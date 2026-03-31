@@ -19,7 +19,7 @@ import {
   type ModelTier,
   type CliToolConfig,
 } from "../../shared/types";
-import { useAppStore, type Account, type PrefetchProgress, type SettingsTab } from "../store";
+import { useAppStore, type Account, type SettingsTab } from "../store";
 import { reconfigurePostHog, trackEvent } from "../services/posthog";
 import { SplitConfigEditor } from "./SplitConfigEditor";
 import { MemoriesTab } from "./MemoriesTab";
