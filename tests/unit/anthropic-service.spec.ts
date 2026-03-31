@@ -235,14 +235,15 @@ test.describe("AnthropicService", () => {
     };
 
     // Sonnet pricing: input=$3/M, output=$15/M, cacheRead=$0.3/M, cacheWrite=$3.75/M
-    // usage: 100 input, 50 output, 20 cacheRead, 10 cacheWrite
-    // inputCost = (100 - 20 - 10) * 3.0 / 1_000_000 = 70 * 3.0 / 1M = 0.00021
+    // usage: 100 input (non-cached), 50 output, 20 cacheRead, 10 cacheWrite
+    // API input_tokens already excludes cache tokens — they're separate fields
+    // inputCost = 100 * 3.0 / 1_000_000 = 0.0003
     // outputCost = 50 * 15.0 / 1_000_000 = 0.00075
     // cacheReadCost = 20 * 0.3 / 1_000_000 = 0.000006
     // cacheWriteCost = 10 * 3.75 / 1_000_000 = 0.0000375
-    // total $ = 0.00021 + 0.00075 + 0.000006 + 0.0000375 = 0.0010035
-    // total cents = 0.10035
-    expect(row.cost_cents).toBeCloseTo(0.10035, 4);
+    // total $ = 0.0003 + 0.00075 + 0.000006 + 0.0000375 = 0.0010935
+    // total cents = 0.10935
+    expect(row.cost_cents).toBeCloseTo(0.10935, 4);
   });
 
   test("timeout via AbortController aborts the request", async () => {

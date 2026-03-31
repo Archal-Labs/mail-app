@@ -84,8 +84,9 @@ interface CreateOptions {
   timeoutMs?: number;
 }
 
-// Anthropic client — can be replaced for testing
+// Anthropic client — singleton for production, replaceable for testing
 let _anthropicClient: Anthropic | null = null;
+let _defaultClient: Anthropic | null = null;
 
 /**
  * Replace the Anthropic client for testing. Pass null to reset.
@@ -96,7 +97,9 @@ export function _setClientForTesting(client: unknown): void {
 }
 
 function getClient(): Anthropic {
-  return _anthropicClient || new Anthropic();
+  if (_anthropicClient) return _anthropicClient;
+  if (!_defaultClient) _defaultClient = new Anthropic();
+  return _defaultClient;
 }
 
 // Database handle — set via setDatabase() during app init
@@ -156,8 +159,8 @@ function calculateCostCents(
   cacheCreateTokens: number,
 ): number {
   const pricing = PRICING[model] || DEFAULT_PRICING;
-  const inputCost =
-    ((inputTokens - cacheReadTokens - cacheCreateTokens) * pricing.input) / 1_000_000;
+  // input_tokens from the API already excludes cache tokens — they're separate fields
+  const inputCost = (inputTokens * pricing.input) / 1_000_000;
   const outputCost = (outputTokens * pricing.output) / 1_000_000;
   const cacheReadCost = (cacheReadTokens * pricing.cacheRead) / 1_000_000;
   const cacheWriteCost = (cacheCreateTokens * pricing.cacheWrite) / 1_000_000;
@@ -269,113 +272,111 @@ export async function createMessage(
   const model = params.model;
   const startTime = Date.now();
 
-  // Set up abort controller for timeout
-  let abortController: AbortController | undefined;
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  if (timeoutMs) {
-    abortController = new AbortController();
-    timeoutHandle = setTimeout(() => abortController!.abort(), timeoutMs);
-  }
-
   const client = getClient();
   let lastError: unknown = null;
   let totalAttempts = 0;
 
-  try {
-    // Determine max retries across all categories
-    const maxPossibleRetries = Math.max(...Object.values(RETRY_CONFIGS).map((c) => c.maxRetries));
+  // Determine max retries across all categories
+  const maxPossibleRetries = Math.max(...Object.values(RETRY_CONFIGS).map((c) => c.maxRetries));
 
-    for (let attempt = 0; attempt <= maxPossibleRetries; attempt++) {
-      totalAttempts = attempt + 1;
+  for (let attempt = 0; attempt <= maxPossibleRetries; attempt++) {
+    totalAttempts = attempt + 1;
 
-      try {
-        const response = await client.messages.create(params, {
-          signal: abortController?.signal,
-        });
-
-        // Success — record and return
-        const usage = response.usage as unknown as Record<string, number>;
-        const inputTokens = usage.input_tokens || 0;
-        const outputTokens = usage.output_tokens || 0;
-        const cacheReadTokens = usage.cache_read_input_tokens || 0;
-        const cacheCreateTokens = usage.cache_creation_input_tokens || 0;
-
-        recordCall(
-          model,
-          caller,
-          emailId || null,
-          accountId || null,
-          inputTokens,
-          outputTokens,
-          cacheReadTokens,
-          cacheCreateTokens,
-          Date.now() - startTime,
-          true,
-          null,
-        );
-
-        if (totalAttempts > 1) {
-          log.info({ caller, model, attempts: totalAttempts }, "LLM call succeeded after retries");
-        }
-
-        return response;
-      } catch (error) {
-        lastError = error;
-        const category = getRetryCategory(error);
-
-        if (!category) {
-          // Non-retryable error — fail immediately
-          break;
-        }
-
-        const config = RETRY_CONFIGS[category];
-        if (attempt >= config.maxRetries) {
-          // Exhausted retries for this category
-          break;
-        }
-
-        // Calculate delay with exponential backoff + jitter
-        const baseDelay = Math.min(config.initialDelayMs * Math.pow(2, attempt), config.maxDelayMs);
-        const jitter = baseDelay * 0.1 * Math.random();
-        const delay = baseDelay + jitter;
-
-        log.warn(
-          {
-            caller,
-            model,
-            attempt: attempt + 1,
-            maxRetries: config.maxRetries,
-            category,
-            delayMs: Math.round(delay),
-          },
-          "LLM call failed, retrying",
-        );
-
-        // Non-blocking sleep
-        await asyncSleep(delay);
-      }
+    // Per-attempt timeout so retries get fresh abort controllers
+    let abortController: AbortController | undefined;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs) {
+      abortController = new AbortController();
+      timeoutHandle = setTimeout(() => abortController!.abort(), timeoutMs);
     }
 
-    // All retries exhausted — record failure and throw
-    const errMsg = lastError instanceof Error ? lastError.message : String(lastError);
-    recordCall(
-      model,
-      caller,
-      emailId || null,
-      accountId || null,
-      0,
-      0,
-      0,
-      0,
-      Date.now() - startTime,
-      false,
-      errMsg,
-    );
+    try {
+      const response = await client.messages.create(params, {
+        signal: abortController?.signal,
+      });
 
-    throw lastError;
-  } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
+      // Success — record and return
+      const usage = response.usage as unknown as Record<string, number>;
+      const inputTokens = usage.input_tokens || 0;
+      const outputTokens = usage.output_tokens || 0;
+      const cacheReadTokens = usage.cache_read_input_tokens || 0;
+      const cacheCreateTokens = usage.cache_creation_input_tokens || 0;
+
+      recordCall(
+        model,
+        caller,
+        emailId || null,
+        accountId || null,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheCreateTokens,
+        Date.now() - startTime,
+        true,
+        null,
+      );
+
+      if (totalAttempts > 1) {
+        log.info({ caller, model, attempts: totalAttempts }, "LLM call succeeded after retries");
+      }
+
+      return response;
+    } catch (error) {
+      lastError = error;
+      const category = getRetryCategory(error);
+
+      if (!category) {
+        // Non-retryable error — fail immediately
+        break;
+      }
+
+      const config = RETRY_CONFIGS[category];
+      if (attempt >= config.maxRetries) {
+        // Exhausted retries for this category
+        break;
+      }
+
+      // Calculate delay with exponential backoff + jitter
+      const baseDelay = Math.min(config.initialDelayMs * Math.pow(2, attempt), config.maxDelayMs);
+      const jitter = baseDelay * 0.1 * Math.random();
+      const delay = baseDelay + jitter;
+
+      log.warn(
+        {
+          caller,
+          model,
+          attempt: attempt + 1,
+          maxRetries: config.maxRetries,
+          category,
+          delayMs: Math.round(delay),
+        },
+        "LLM call failed, retrying",
+      );
+
+      // Non-blocking sleep
+      await asyncSleep(delay);
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
   }
+
+  // All retries exhausted — record failure and throw
+  const errMsg = lastError instanceof Error ? lastError.message : String(lastError);
+  recordCall(
+    model,
+    caller,
+    emailId || null,
+    accountId || null,
+    0,
+    0,
+    0,
+    0,
+    Date.now() - startTime,
+    false,
+    errMsg,
+  );
+
+  throw lastError;
 }
 
 /**

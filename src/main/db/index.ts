@@ -398,7 +398,7 @@ const NUMBERED_MIGRATIONS: Migration[] = [
 function runNumberedMigrations(db: DatabaseInstance): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
-      version INTEGER NOT NULL,
+      version INTEGER NOT NULL UNIQUE,
       applied_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
