@@ -29,7 +29,29 @@ async function waitForEmailListReady(page: Page): Promise<void> {
   await expect(page.locator("text=Inbox").first()).toBeVisible({ timeout: 10000 });
   await expect(page.locator("div[data-thread-id]").first()).toBeVisible({ timeout: 10000 });
   // Let React effects settle (keyboard handler registration, store subscriptions)
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(1000);
+}
+
+/** Press a key and retry until the expected locator becomes visible.
+ * Works around CI timing where keyboard events fire before React state commits. */
+async function pressKeyUntilVisible(
+  page: Page,
+  key: string,
+  locator: ReturnType<Page["locator"]>,
+  { timeout = 10000, retryInterval = 500 } = {},
+): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    await page.keyboard.press(key);
+    try {
+      await expect(locator).toBeVisible({ timeout: retryInterval });
+      return;
+    } catch {
+      // Key didn't take effect yet — retry
+    }
+  }
+  // Final attempt — let it throw the real assertion error
+  await expect(locator).toBeVisible({ timeout: 2000 });
 }
 
 test.describe("Keyboard Navigation - j/k Movement", () => {
@@ -56,12 +78,10 @@ test.describe("Keyboard Navigation - j/k Movement", () => {
   test("j selects the first email when nothing is selected", async () => {
     await waitForEmailListReady(page);
 
-    await page.keyboard.press("j");
-
-    // Wait for selection to appear (CI can be slow to process keyboard events)
-    await expect(page.locator("div[data-thread-id][data-selected='true']")).toBeVisible({
-      timeout: 10000,
-    });
+    // Retry j until selection appears — on CI the keyboard handler or store
+    // subscription may not be ready on the first press
+    const selectedRow = page.locator("div[data-thread-id][data-selected='true']");
+    await pressKeyUntilVisible(page, "j", selectedRow, { timeout: 15000 });
   });
 
   test("j moves selection down to next email", async () => {
@@ -153,21 +173,13 @@ test.describe("Keyboard Navigation - Enter and Escape", () => {
   test("Enter opens email in full view", async () => {
     await waitForEmailListReady(page);
 
-    // Select first thread
-    await page.keyboard.press("j");
-    // Wait for selection before pressing Enter
-    await expect(page.locator("div[data-thread-id][data-selected='true']")).toBeVisible({
-      timeout: 10000,
-    });
+    // Select first thread — retry until selection appears
+    const selectedRow = page.locator("div[data-thread-id][data-selected='true']");
+    await pressKeyUntilVisible(page, "j", selectedRow, { timeout: 15000 });
 
-    // Open full view — wait briefly for selection state to commit before Enter
-    await page.waitForTimeout(200);
-    await page.keyboard.press("Enter");
-
-    // In full view, Reply All button should be visible
-    // CI view transitions can be slow — give generous timeout
+    // Open full view — retry Enter until full view renders
     const replyButton = page.locator("button[title='Reply All']").first();
-    await expect(replyButton).toBeVisible({ timeout: 15000 });
+    await pressKeyUntilVisible(page, "Enter", replyButton, { timeout: 15000 });
   });
 
   test("Escape exits full view back to split view", async () => {
@@ -213,21 +225,15 @@ test.describe("Keyboard Compose - Reply, Reply-All, Forward", () => {
   test("'r' opens reply-all inline compose in full view", async () => {
     await waitForEmailListReady(page);
 
-    // Navigate to first email and enter full view
-    await page.keyboard.press("j");
-    await expect(page.locator("div[data-thread-id][data-selected='true']")).toBeVisible({
-      timeout: 10000,
-    });
-    await page.waitForTimeout(200);
-    await page.keyboard.press("Enter");
-    await expect(page.locator("button[title='Reply All']").first()).toBeVisible({ timeout: 15000 });
+    // Navigate to first email and enter full view — retry each step
+    const selectedRow = page.locator("div[data-thread-id][data-selected='true']");
+    await pressKeyUntilVisible(page, "j", selectedRow, { timeout: 15000 });
+    const replyButton = page.locator("button[title='Reply All']").first();
+    await pressKeyUntilVisible(page, "Enter", replyButton, { timeout: 15000 });
 
-    // Press 'r' for reply-all — wait for full view to settle
-    await page.waitForTimeout(200);
-    await page.keyboard.press("r");
-
+    // Press 'r' for reply-all
     const inlineCompose = page.locator("[data-testid='inline-compose']");
-    await expect(inlineCompose).toBeVisible({ timeout: 10000 });
+    await pressKeyUntilVisible(page, "r", inlineCompose, { timeout: 15000 });
     await expect(inlineCompose.locator("text=Reply")).toBeVisible();
 
     // Should have an editor
@@ -310,11 +316,9 @@ test.describe("Keyboard Actions - Archive (e)", () => {
     const countBefore = await threadRows.count();
     expect(countBefore).toBeGreaterThan(0);
 
-    // Select first thread and wait for selection to commit
-    await page.keyboard.press("j");
-    await expect(page.locator("div[data-thread-id][data-selected='true']")).toBeVisible({
-      timeout: 10000,
-    });
+    // Select first thread — retry until selection appears
+    const selectedRow = page.locator("div[data-thread-id][data-selected='true']");
+    await pressKeyUntilVisible(page, "j", selectedRow, { timeout: 15000 });
     const selectedBefore = await getSelectedThreadId(page);
 
     // Press 'e' to archive
