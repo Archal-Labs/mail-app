@@ -60,6 +60,42 @@ export async function launchElectronApp(
 }
 
 /**
+ * Close an Electron app for test cleanup.
+ *
+ * electronApp.close() can hang when the renderer has pending timers,
+ * and Playwright's internal pipe handles keep the worker alive past the
+ * 60s teardown limit. We SIGTERM the process directly, wait for exit,
+ * and SIGKILL as a fallback.
+ */
+export async function closeApp(electronApp: ElectronApplication): Promise<void> {
+  const proc = electronApp.process();
+  const pid = proc.pid;
+  if (!pid) return;
+
+  const exited = new Promise<void>((resolve) => {
+    proc.once("exit", () => resolve());
+    proc.once("close", () => resolve());
+  });
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+
+  const gracefulTimeout = setTimeout(() => {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already exited */
+    }
+  }, 5000);
+
+  await Promise.race([exited, new Promise<void>((r) => setTimeout(r, 8000))]);
+  clearTimeout(gracefulTimeout);
+}
+
+/**
  * Wait for email list to be fully rendered and React effects to settle.
  * On CI (slow CPU + xvfb), there's a gap between thread rows appearing in the DOM
  * and the keyboard handler's useEffect registering / store subscriptions updating.
