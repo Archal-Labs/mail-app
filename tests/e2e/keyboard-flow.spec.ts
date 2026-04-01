@@ -21,6 +21,12 @@ async function getSelectedThreadId(page: Page): Promise<string | null> {
   return null;
 }
 
+/** Wait for email list to be fully rendered (not just the Inbox header) */
+async function waitForEmailListReady(page: Page): Promise<void> {
+  await expect(page.locator("text=Inbox").first()).toBeVisible({ timeout: 10000 });
+  await expect(page.locator("div[data-thread-id]").first()).toBeVisible({ timeout: 10000 });
+}
+
 test.describe("Keyboard Navigation - j/k Movement", () => {
   test.describe.configure({ mode: "serial" });
   let electronApp: ElectronApplication;
@@ -43,7 +49,7 @@ test.describe("Keyboard Navigation - j/k Movement", () => {
   });
 
   test("j selects the first email when nothing is selected", async () => {
-    await expect(page.locator("text=Inbox").first()).toBeVisible({ timeout: 10000 });
+    await waitForEmailListReady(page);
 
     await page.keyboard.press("j");
 
@@ -140,14 +146,7 @@ test.describe("Keyboard Navigation - Enter and Escape", () => {
   });
 
   test("Enter opens email in full view", async () => {
-    await expect(page.locator("text=Inbox").first()).toBeVisible({ timeout: 10000 });
-    // Wait for email list to fully render before keyboard nav
-    await page
-      .locator("[data-testid='email-list-item'], button")
-      .filter({ hasText: /Garry|HR Team/ })
-      .first()
-      .waitFor({ timeout: 10000 });
-    await page.waitForTimeout(500);
+    await waitForEmailListReady(page);
 
     // Select first thread
     await page.keyboard.press("j");
@@ -205,7 +204,7 @@ test.describe("Keyboard Compose - Reply, Reply-All, Forward", () => {
   });
 
   test("'r' opens reply-all inline compose in full view", async () => {
-    await expect(page.locator("text=Inbox").first()).toBeVisible({ timeout: 10000 });
+    await waitForEmailListReady(page);
 
     // Navigate to first email and enter full view
     await page.keyboard.press("j");
@@ -217,10 +216,9 @@ test.describe("Keyboard Compose - Reply, Reply-All, Forward", () => {
 
     // Press 'r' for reply-all
     await page.keyboard.press("r");
-    await page.waitForTimeout(800);
 
     const inlineCompose = page.locator("[data-testid='inline-compose']");
-    await expect(inlineCompose).toBeVisible({ timeout: 5000 });
+    await expect(inlineCompose).toBeVisible({ timeout: 10000 });
     await expect(inlineCompose.locator("text=Reply")).toBeVisible();
 
     // Should have an editor
@@ -234,10 +232,9 @@ test.describe("Keyboard Compose - Reply, Reply-All, Forward", () => {
 
   test("'R' (Shift+r) opens reply (single) inline compose", async () => {
     await page.keyboard.press("Shift+r");
-    await page.waitForTimeout(800);
 
     const inlineCompose = page.locator("[data-testid='inline-compose']");
-    await expect(inlineCompose).toBeVisible({ timeout: 5000 });
+    await expect(inlineCompose).toBeVisible({ timeout: 10000 });
 
     // Close
     await inlineCompose.locator("[data-testid='inline-compose-close']").click();
@@ -246,10 +243,9 @@ test.describe("Keyboard Compose - Reply, Reply-All, Forward", () => {
 
   test("'f' opens forward inline compose with To field", async () => {
     await page.keyboard.press("f");
-    await page.waitForTimeout(800);
 
     const inlineCompose = page.locator("[data-testid='inline-compose']");
-    await expect(inlineCompose).toBeVisible({ timeout: 5000 });
+    await expect(inlineCompose).toBeVisible({ timeout: 10000 });
     await expect(inlineCompose.getByText("Forward", { exact: true })).toBeVisible();
 
     // Forward should have AddressInput for To
@@ -263,9 +259,8 @@ test.describe("Keyboard Compose - Reply, Reply-All, Forward", () => {
   test("switching between r and f correctly changes compose mode", async () => {
     // Open reply
     await page.keyboard.press("r");
-    await page.waitForTimeout(800);
     const inlineCompose = page.locator("[data-testid='inline-compose']");
-    await expect(inlineCompose).toBeVisible({ timeout: 5000 });
+    await expect(inlineCompose).toBeVisible({ timeout: 10000 });
     await expect(inlineCompose.locator("text=Reply")).toBeVisible();
 
     // Close
@@ -274,8 +269,7 @@ test.describe("Keyboard Compose - Reply, Reply-All, Forward", () => {
 
     // Open forward
     await page.keyboard.press("f");
-    await page.waitForTimeout(800);
-    await expect(inlineCompose).toBeVisible({ timeout: 5000 });
+    await expect(inlineCompose).toBeVisible({ timeout: 10000 });
     await expect(inlineCompose.getByText("Forward", { exact: true })).toBeVisible();
 
     // Close
