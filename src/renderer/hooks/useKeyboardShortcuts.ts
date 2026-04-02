@@ -459,10 +459,10 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}) 
             setViewMode("split");
           }
         } else {
-          const currentIndex = currentThreads.findIndex((t) => t.threadId === selectedThreadId);
-          if (currentIndex >= 0 && currentThreads.length > 1) {
-            const nextIndex = Math.min(currentIndex, currentThreads.length - 2);
-            const nextThread = currentThreads.filter((t) => t.threadId !== selectedThreadId)[
+          const currentIndex = visibleThreads.findIndex((t) => t.threadId === selectedThreadId);
+          if (currentIndex >= 0 && visibleThreads.length > 1) {
+            const nextIndex = Math.min(currentIndex, visibleThreads.length - 2);
+            const nextThread = visibleThreads.filter((t) => t.threadId !== selectedThreadId)[
               nextIndex
             ];
             if (viewMode === "full" && nextThread) markThreadAsRead(nextThread.threadId);
@@ -523,10 +523,10 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}) 
             setViewMode("split");
           }
         } else {
-          const currentIndex = currentThreads.findIndex((t) => t.threadId === selectedThreadId);
-          if (currentIndex >= 0 && currentThreads.length > 1) {
-            const nextIndex = Math.min(currentIndex, currentThreads.length - 2);
-            const nextThread = currentThreads.filter((t) => t.threadId !== selectedThreadId)[
+          const currentIndex = visibleThreads.findIndex((t) => t.threadId === selectedThreadId);
+          if (currentIndex >= 0 && visibleThreads.length > 1) {
+            const nextIndex = Math.min(currentIndex, visibleThreads.length - 2);
+            const nextThread = visibleThreads.filter((t) => t.threadId !== selectedThreadId)[
               nextIndex
             ];
             if (viewMode === "full" && nextThread) markThreadAsRead(nextThread.threadId);
@@ -662,7 +662,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}) 
           (d) => !currentAccountId || d.accountId === currentAccountId,
         );
         const hasAiDrafts = state.emails.some(
-          (e) => e.draft && (!currentAccountId || e.accountId === currentAccountId),
+          (e) => e.draft && e.draft.body && (!currentAccountId || e.accountId === currentAccountId),
         );
         if (hasLocalDrafts || hasAiDrafts) ids.push("__drafts__");
         // Only include snoozed when there are snoozed threads with loaded email data
@@ -792,8 +792,8 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}) 
             } else {
               openCompose("reply-all", focusedThreadEmailId ?? selectedEmailId);
             }
-          } else if (selectedThreadId && currentThreads.length > 0) {
-            const thread = currentThreads.find((t) => t.threadId === selectedThreadId);
+          } else if (selectedThreadId && visibleThreads.length > 0) {
+            const thread = visibleThreads.find((t) => t.threadId === selectedThreadId);
             if (thread) {
               e.preventDefault();
               markThreadAsRead(thread.threadId);
