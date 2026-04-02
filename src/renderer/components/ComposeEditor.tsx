@@ -160,6 +160,15 @@ function SnippetPicker({
   );
 }
 
+/** Escape plain text for safe injection into HTML */
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 /**
  * Resolve snippet variables:
  * - {first_name} → recipient's first name
@@ -176,9 +185,10 @@ function resolveSnippetVariables(
   // System variables that are auto-resolved (not prompted)
   const SYSTEM_VARS = new Set(["my_name", "first_name"]);
 
-  // Resolve {my_name} — use replacer function to avoid $-pattern interpretation
+  // Resolve {my_name} — escape for HTML, use replacer to avoid $-pattern interpretation
   if (senderName) {
-    resolved = resolved.replace(/\{my_name\}/gi, () => senderName);
+    const escaped = escapeHtml(senderName);
+    resolved = resolved.replace(/\{my_name\}/gi, () => escaped);
   }
 
   // Resolve {first_name} from recipient email (best effort: take part before @, capitalize)
@@ -186,7 +196,8 @@ function resolveSnippetVariables(
     const localPart = recipientEmail.split("@")[0] || "";
     const firstName = localPart.split(/[._-]/)[0];
     const capitalized = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
-    resolved = resolved.replace(/\{first_name\}/gi, () => capitalized);
+    const escaped = escapeHtml(capitalized);
+    resolved = resolved.replace(/\{first_name\}/gi, () => escaped);
   }
 
   // Find remaining custom placeholders and prompt for them
@@ -199,7 +210,7 @@ function resolveSnippetVariables(
     if (SYSTEM_VARS.has(varName.toLowerCase())) continue;
     if (!prompted.has(varName)) {
       const value = window.prompt(`Fill in {${varName}}:`, "") ?? "";
-      prompted.set(varName, value);
+      prompted.set(varName, escapeHtml(value));
     }
   }
 
