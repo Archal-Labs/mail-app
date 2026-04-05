@@ -177,6 +177,11 @@ export class AgentCoordinator {
     // Worker is spawned lazily on first use via ensureWorker()
   }
 
+  /** Update the window reference when macOS re-creates the window on activate. */
+  setMainWindow(mainWindow: BrowserWindow): void {
+    this.mainWindow = mainWindow;
+  }
+
   private spawnWorker(): void {
     // Worker lives in out/worker/, one level up from out/main/ where __dirname points
     const workerPath = path.join(__dirname, "..", "worker", "agent-worker.cjs");
@@ -361,13 +366,6 @@ export class AgentCoordinator {
 
     // Forward events from port1 to the renderer via IPC
     port1.on("message", (event) => {
-      // If the window was destroyed (user quit), cancel all running tasks
-      // immediately rather than continuing to process events to nowhere.
-      if (this.mainWindow?.isDestroyed()) {
-        this.cancelAll();
-        return;
-      }
-
       const agentEvent = event.data as ScopedAgentEvent;
       this.sendToRenderer("agent:event", {
         taskId,
