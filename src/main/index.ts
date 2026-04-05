@@ -397,6 +397,16 @@ setAnthropicServiceDb(_db);
 }
 
 app.whenReady().then(async () => {
+  // Set the session download path to prevent Chromium from probing ~/Downloads.
+  // app.setPath() handles the path registry, but the session's download manager
+  // has its own path that defaults to the OS download directory.
+  if (process.platform === "darwin") {
+    const { mkdirSync } = await import("fs");
+    const safeDownloads = join(app.getPath("userData"), "downloads");
+    mkdirSync(safeDownloads, { recursive: true });
+    session.defaultSession.setDownloadPath(safeDownloads);
+  }
+
   // Migrate tokens/credentials from old ~/.config/exo/ path (macOS only)
   const { migrateOldConfigIfNeeded } = await import("./services/gmail-client");
   await migrateOldConfigIfNeeded();
