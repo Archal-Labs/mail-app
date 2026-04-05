@@ -83,7 +83,6 @@ if (process.platform === "darwin") {
   app.setPath("downloads", safeDir);
   app.setPath("desktop", safeDir);
 }
-
 // Fix PATH for packaged macOS apps (launched from Finder/Dock get minimal PATH).
 // Instead of spawning a shell (which sources user profiles that can trigger TCC
 // prompts like "access files on a network volume" or "access contacts"), we read
