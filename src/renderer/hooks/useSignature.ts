@@ -45,14 +45,14 @@ export function useSignature(accountId: string) {
 
   const activeSignature = availableSignatures.find((s: Signature) => s.id === activeSignatureId);
 
-  const exoBrandingHtml = showExoBranding
-    ? `<div style="margin-top:12px;font-size:12px;color:#999;"><div>--</div>Sent by <a href="https://exo.email" style="color:#999;">Exo</a></div>`
+  const exoBrandingLine = showExoBranding
+    ? `<div style="margin-top:12px;font-size:12px;color:#999;">Sent by <a href="https://exo.email" style="color:#999;">Exo</a></div>`
     : "";
 
   const signatureHtml = activeSignature?.bodyHtml
-    ? `<div class="email-signature"><br><div>--</div>${activeSignature.bodyHtml}${exoBrandingHtml}</div>`
-    : exoBrandingHtml
-      ? `<div class="email-signature">${exoBrandingHtml}</div>`
+    ? `<div class="email-signature"><br><div>--</div>${activeSignature.bodyHtml}${exoBrandingLine}</div>`
+    : exoBrandingLine
+      ? `<div class="email-signature"><br><div>--</div>${exoBrandingLine}</div>`
       : "";
 
   return {
