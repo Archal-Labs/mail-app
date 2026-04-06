@@ -345,7 +345,10 @@ export function SnippetsEditor() {
 }
 
 function stripHtml(html: string): string {
-  return html.replace(/<[^>]*>/g, "").trim();
+  // Use a temporary DOM element to properly decode HTML entities and strip tags
+  const tmp = document.createElement("div");
+  tmp.innerHTML = html;
+  return (tmp.textContent || tmp.innerText || "").trim();
 }
 
 function SnippetForm({
@@ -360,7 +363,16 @@ function SnippetForm({
   isSaving: boolean;
 }) {
   const [name, setName] = useState(snippet?.name ?? "");
-  const [body, setBody] = useState(snippet?.body ?? "");
+  // Convert HTML to plain text for editing so users don't see raw tags
+  const [body, setBody] = useState(() => {
+    const raw = snippet?.body ?? "";
+    if (/<[a-z][\s\S]*>/i.test(raw)) {
+      const tmp = document.createElement("div");
+      tmp.innerHTML = raw;
+      return tmp.textContent || tmp.innerText || "";
+    }
+    return raw;
+  });
   const [shortcut, setShortcut] = useState(snippet?.shortcut ?? "");
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -402,7 +414,7 @@ function SnippetForm({
           />
         </div>
         <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-          Used to quickly find this snippet when searching in the snippet picker.
+          Type ; in the compose editor to open the snippet picker, then search by shortcut name.
         </p>
       </div>
       <div>

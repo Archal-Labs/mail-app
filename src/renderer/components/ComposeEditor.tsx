@@ -111,7 +111,7 @@ function SnippetPicker({
   return (
     <div
       data-snippet-picker
-      className="absolute top-full left-0 mt-1 w-72 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 max-h-64 flex flex-col"
+      className="absolute bottom-full left-0 mb-1 w-72 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 max-h-64 flex flex-col"
     >
       <div className="p-2 border-b border-gray-200 dark:border-gray-700">
         <input
@@ -227,13 +227,16 @@ function Toolbar({
   editor,
   snippets,
   onInsertSnippet,
+  showSnippetPicker,
+  setShowSnippetPicker,
 }: {
   editor: Editor | null;
   snippets: Snippet[];
   onInsertSnippet: (snippet: Snippet) => void;
+  showSnippetPicker: boolean;
+  setShowSnippetPicker: (show: boolean) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [showSnippetPicker, setShowSnippetPicker] = useState(false);
 
   const setLink = useCallback(() => {
     if (!editor) return;
@@ -514,6 +517,7 @@ export function ComposeEditor({
   const currentAccountRecord = accounts.find((a) => a.id === currentAccountId);
   const senderName =
     currentAccountRecord?.displayName || currentAccountRecord?.email?.split("@")[0];
+  const [showSnippetPicker, setShowSnippetPicker] = useState(false);
 
   // Ref keeps the latest onAddToCc without recreating extensions
   const onAddToCcRef = useRef<((email: string) => void) | null>(onAddToCc ?? null);
@@ -523,6 +527,17 @@ export function ComposeEditor({
 
   // Stable ref object for the extension (created once)
   const stableRef = useMemo(() => onAddToCcRef, []);
+
+  // Ref for snippet picker toggle so the editor keydown handler can access it
+  // without recreating the editor
+  const snippetPickerRef = useRef(setShowSnippetPicker);
+  useEffect(() => {
+    snippetPickerRef.current = setShowSnippetPicker;
+  }, [setShowSnippetPicker]);
+  const hasSnippetsRef = useRef(accountSnippets.length > 0);
+  useEffect(() => {
+    hasSnippetsRef.current = accountSnippets.length > 0;
+  }, [accountSnippets.length]);
 
   const editor = useEditor({
     extensions: [
@@ -558,6 +573,15 @@ export function ComposeEditor({
     editorProps: {
       attributes: {
         class: "prose prose-sm max-w-none focus:outline-none min-h-[100px] p-3",
+      },
+      // Open snippet picker when user types ";"
+      handleKeyDown: (_view: EditorView, event: KeyboardEvent) => {
+        if (event.key === ";" && !event.metaKey && !event.ctrlKey && hasSnippetsRef.current) {
+          event.preventDefault();
+          snippetPickerRef.current(true);
+          return true;
+        }
+        return false;
       },
       // Handle paste and drop of images
       handlePaste: (view: EditorView, event: ClipboardEvent) => {
@@ -643,6 +667,8 @@ export function ComposeEditor({
       <Toolbar
         editor={editor}
         snippets={accountSnippets}
+        showSnippetPicker={showSnippetPicker}
+        setShowSnippetPicker={setShowSnippetPicker}
         onInsertSnippet={(snippet) => {
           if (!editor) return;
           const resolved = resolveSnippetVariables(snippet.body, recipientEmail, senderName);
