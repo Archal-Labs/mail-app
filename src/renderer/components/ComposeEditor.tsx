@@ -111,7 +111,7 @@ function SnippetPicker({
   return (
     <div
       data-snippet-picker
-      className="absolute bottom-full left-0 mb-1 w-72 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 max-h-64 flex flex-col"
+      className="absolute top-full left-0 mt-1 w-72 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 max-h-64 flex flex-col"
     >
       <div className="p-2 border-b border-gray-200 dark:border-gray-700">
         <input
@@ -662,7 +662,7 @@ export function ComposeEditor({
 
   return (
     <div
-      className={`border border-gray-300 dark:border-gray-600 rounded-lg overflow-hidden bg-white dark:bg-gray-800 ${className}`}
+      className={`border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 ${className}`}
     >
       <Toolbar
         editor={editor}
