@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, session, nativeTheme } from "electron";
 import { join } from "path";
 import { readFileSync, existsSync, readdirSync } from "fs";
 import { electronApp, optimizer } from "@electron-toolkit/utils";
+import Store from "electron-store";
 
 import { getDataDir, initDevData } from "./data-dir";
 import { createLogger, closeLogs } from "./services/logger";
@@ -127,7 +128,14 @@ if (app.isPackaged && process.platform === "darwin") {
         const installed = readdirSync(versionsDir);
         const match = installed
           .filter((v) => v.startsWith(`v${nvmDefault}`))
-          .sort()
+          .sort((a, b) => {
+            const pa = a.slice(1).split(".").map(Number);
+            const pb = b.slice(1).split(".").map(Number);
+            for (let i = 0; i < 3; i++) {
+              if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+            }
+            return 0;
+          })
           .pop();
         if (match) {
           const nvmBin = join(versionsDir, match, "bin");
@@ -148,15 +156,17 @@ if (app.isPackaged && process.platform === "darwin") {
     }
   }
 
-  // Read user-configured extra PATH directories from the config file.
-  // We read the JSON directly instead of going through electron-store because
-  // the settings module hasn't been imported yet at this point in startup.
+  // Read user-configured extra PATH directories from the config store.
+  // We instantiate a minimal electron-store with the same name and encryption key
+  // as the settings module (which hasn't been imported yet at this point in startup).
   try {
-    const configPath = join(getDataDir(), "exo-config.json");
-    if (existsSync(configPath)) {
-      const raw = JSON.parse(readFileSync(configPath, "utf8"));
-      const rawExtras = raw?.config?.extraPathDirs;
-      const extras: unknown[] = Array.isArray(rawExtras) ? rawExtras : [];
+    const earlyStore = new Store<{ config: { extraPathDirs?: string[] } }>({
+      name: "exo-config",
+      encryptionKey: "exo-encryption-key",
+      cwd: getDataDir(),
+    });
+    const extras = earlyStore.get("config.extraPathDirs") as string[] | undefined;
+    if (Array.isArray(extras)) {
       for (const dir of extras) {
         if (typeof dir === "string" && dir && existsSync(dir)) {
           pathDirs.push(dir);
@@ -164,7 +174,7 @@ if (app.isPackaged && process.platform === "darwin") {
       }
     }
   } catch {
-    /* config not yet created or malformed — skip */
+    /* config not yet created — skip */
   }
 
   // Prepend discovered paths to the (minimal) inherited PATH
