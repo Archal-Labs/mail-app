@@ -508,9 +508,13 @@ export function SettingsPanel({ onClose, initialTab }: SettingsPanelProps) {
   };
 
   const handleToggleExoBranding = async (enabled: boolean) => {
-    setShowExoBranding(enabled);
-    await window.api.settings.set({ showExoBranding: enabled });
-    queryClient.invalidateQueries({ queryKey: ["general-config"] });
+    try {
+      await window.api.settings.set({ showExoBranding: enabled });
+      setShowExoBranding(enabled);
+      queryClient.invalidateQueries({ queryKey: ["general-config"] });
+    } catch {
+      // state stays at previous value; next config load will re-sync
+    }
   };
 
   const handleAddSignature = () => {
