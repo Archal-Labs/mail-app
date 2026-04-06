@@ -127,7 +127,7 @@ if (app.isPackaged && process.platform === "darwin") {
         const versionsDir = join(home, ".nvm", "versions", "node");
         const installed = readdirSync(versionsDir);
         const match = installed
-          .filter((v) => v.startsWith(`v${nvmDefault}`))
+          .filter((v) => v === `v${nvmDefault}` || v.startsWith(`v${nvmDefault}.`))
           .sort((a, b) => {
             const pa = a.slice(1).split(".").map(Number);
             const pb = b.slice(1).split(".").map(Number);
