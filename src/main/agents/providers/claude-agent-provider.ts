@@ -1,5 +1,6 @@
 import { type z } from "zod";
 import path from "path";
+import { createRequire } from "node:module";
 import { spawn as cpSpawn } from "child_process";
 import {
   query,
@@ -366,7 +367,8 @@ export class ClaudeAgentProvider implements AgentProvider {
 const resolvedCliPath = (() => {
   // require.resolve finds the SDK's package.json entry point (sdk.mjs).
   // cli.js sits alongside it in the same directory.
-  const sdkEntry = require.resolve("@anthropic-ai/claude-agent-sdk");
+  const _require = createRequire(import.meta.url);
+  const sdkEntry = _require.resolve("@anthropic-ai/claude-agent-sdk");
   const sdkDir = path.dirname(sdkEntry);
   let cliPath = path.join(sdkDir, "cli.js");
 

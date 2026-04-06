@@ -1,0 +1,6 @@
+{
+  "title": "Exo Mail Agent",
+  "agent": "npx tsx src/headless.ts",
+  "twins": ["google-workspace"],
+  "seeds": { "google-workspace": "gmail-busy-inbox" }
+}

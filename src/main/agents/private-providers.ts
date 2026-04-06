@@ -7,10 +7,11 @@ type ProviderFactory = {
   default: (config: AgentFrameworkConfig) => AgentProvider;
 };
 
-const modules = import.meta.glob("../../agents-private/*/index.ts", { eager: true }) as Record<
-  string,
-  ProviderFactory
->;
+// import.meta.glob is Vite-only. In headless mode (tsx), fall back to empty.
+const modules: Record<string, ProviderFactory> =
+  typeof import.meta.glob === "function"
+    ? (import.meta.glob("../../agents-private/*/index.ts", { eager: true }) as Record<string, ProviderFactory>)
+    : {};
 
 export function discoverPrivateProviders(config: AgentFrameworkConfig): AgentProvider[] {
   const providers: AgentProvider[] = [];

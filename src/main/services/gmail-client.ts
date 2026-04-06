@@ -111,8 +111,8 @@ interface Credentials {
 // Injected at build time via MAIN_VITE_GOOGLE_CLIENT_ID / MAIN_VITE_GOOGLE_CLIENT_SECRET
 // env vars (electron-vite replaces import.meta.env.MAIN_VITE_* in the main process bundle).
 // For local dev without these env vars, the app falls through to credentials.json on disk.
-const _clientId = import.meta.env.MAIN_VITE_GOOGLE_CLIENT_ID ?? "";
-const _clientSecret = import.meta.env.MAIN_VITE_GOOGLE_CLIENT_SECRET ?? "";
+const _clientId = import.meta.env?.MAIN_VITE_GOOGLE_CLIENT_ID ?? process.env.GOOGLE_CLIENT_ID ?? "";
+const _clientSecret = import.meta.env?.MAIN_VITE_GOOGLE_CLIENT_SECRET ?? process.env.GOOGLE_CLIENT_SECRET ?? "";
 const BUNDLED_CREDENTIALS: Credentials | null =
   _clientId && _clientSecret ? { client_id: _clientId, client_secret: _clientSecret } : null;
 
