@@ -662,7 +662,12 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}) 
           (d) => !currentAccountId || d.accountId === currentAccountId,
         );
         const hasAiDrafts = state.emails.some(
-          (e) => e.draft && e.draft.body && (!currentAccountId || e.accountId === currentAccountId),
+          (e) =>
+            e.draft &&
+            e.draft.body &&
+            (!currentAccountId || e.accountId === currentAccountId) &&
+            (e.labelIds?.includes("INBOX") ?? true) &&
+            !state.snoozedThreadIds.has(e.threadId),
         );
         if (hasLocalDrafts || hasAiDrafts) ids.push("__drafts__");
         // Only include snoozed when there are snoozed threads with loaded email data
