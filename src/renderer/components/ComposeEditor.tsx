@@ -200,24 +200,9 @@ function resolveSnippetVariables(
     resolved = resolved.replace(/\{first_name\}/gi, () => escaped);
   }
 
-  // Find remaining custom placeholders and prompt for them
-  const customVarRegex = /\{(\w+)\}/g;
-  let match;
-  const prompted = new Map<string, string>();
-  while ((match = customVarRegex.exec(resolved)) !== null) {
-    const varName = match[1];
-    // Skip system variables that weren't resolved (missing context)
-    if (SYSTEM_VARS.has(varName.toLowerCase())) continue;
-    // Use lowercase key to match the case-insensitive replacement below
-    if (!prompted.has(varName.toLowerCase())) {
-      const value = window.prompt(`Fill in {${varName}}:`, "") ?? "";
-      prompted.set(varName.toLowerCase(), escapeHtml(value));
-    }
-  }
-
-  for (const [varName, value] of prompted) {
-    resolved = resolved.replace(new RegExp(`\\{${varName}\\}`, "gi"), () => value);
-  }
+  // Custom placeholders like {inviter}, {action_item_1} are left as-is
+  // so the user can fill them in directly in the editor after insertion.
+  // This avoids blocking window.prompt() dialogs.
 
   return resolved;
 }

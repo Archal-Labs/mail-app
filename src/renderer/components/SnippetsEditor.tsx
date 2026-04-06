@@ -351,6 +351,21 @@ function stripHtml(html: string): string {
   return (tmp.textContent || tmp.innerText || "").trim();
 }
 
+/** Convert HTML to plain text preserving line breaks from <br>, <div>, <p> etc. */
+function htmlToPlainText(html: string): string {
+  // Insert newlines before block-level closing tags and for <br>
+  let text = html;
+  text = text.replace(/<br\s*\/?>/gi, "\n");
+  text = text.replace(/<\/div>/gi, "\n");
+  text = text.replace(/<\/p>/gi, "\n\n");
+  // Strip remaining tags
+  const tmp = document.createElement("div");
+  tmp.innerHTML = text;
+  const result = tmp.textContent || tmp.innerText || "";
+  // Collapse runs of 3+ newlines to 2, trim
+  return result.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function SnippetForm({
   snippet,
   onSave,
@@ -363,13 +378,11 @@ function SnippetForm({
   isSaving: boolean;
 }) {
   const [name, setName] = useState(snippet?.name ?? "");
-  // Convert HTML to plain text for editing so users don't see raw tags
+  // Convert HTML to plain text for editing, preserving line breaks
   const [body, setBody] = useState(() => {
     const raw = snippet?.body ?? "";
     if (/<[a-z][\s\S]*>/i.test(raw)) {
-      const tmp = document.createElement("div");
-      tmp.innerHTML = raw;
-      return tmp.textContent || tmp.innerText || "";
+      return htmlToPlainText(raw);
     }
     return raw;
   });
