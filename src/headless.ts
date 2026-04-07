@@ -28,6 +28,16 @@ import type {
 import type { AgentContext } from "./shared/agent-types";
 
 async function main(): Promise<void> {
+  // ── Preflight check ─────────────────────────────────────────────────
+  // Archal runs a preflight boot check before provisioning twins.
+  // When ARCHAL_PREFLIGHT=1, just verify the process can start and exit 0.
+  if (process.env["ARCHAL_PREFLIGHT"] === "1") {
+    console.error("Preflight: headless agent boots OK");
+    // Use setTimeout to let pino's sonic-boom flush before exit
+    setTimeout(() => process.exit(0), 50);
+    return;
+  }
+
   // ── Read task ───────────────────────────────────────────────────────
 
   const task =
@@ -63,18 +73,36 @@ async function main(): Promise<void> {
   const accountId = process.env["EXO_ACCOUNT_ID"] ?? "default";
   let gmailClient: GmailClient | null = null;
 
+  // Ensure dummy OAuth credentials + tokens exist so the Gmail client
+  // doesn't trigger an interactive browser OAuth flow. When running behind
+  // Archal's TLS proxy, all gmail.googleapis.com calls route to the twin
+  // which doesn't check OAuth — the token values are irrelevant.
+  {
+    const { writeFileSync: _wfs, existsSync: _exists, mkdirSync: _mkdir } = await import("fs");
+    const { join: _join } = await import("path");
+    const { homedir: _home } = await import("os");
+    const _dir = _join(_home(), ".exo");
+    const _cred = _join(_dir, "credentials.json");
+    const _tok = accountId === "default" ? _join(_dir, "tokens.json") : _join(_dir, `tokens-${accountId}.json`);
+    if (!_exists(_dir)) _mkdir(_dir, { recursive: true });
+    if (!_exists(_cred)) {
+      _wfs(_cred, JSON.stringify({ client_id: "archal-headless", client_secret: "archal-headless" }));
+    }
+    // Always write tokens to ensure a valid future expiry
+    _wfs(_tok, JSON.stringify({
+      access_token: "archal-headless-proxy-token",
+      refresh_token: "archal-headless-proxy-refresh",
+      token_type: "Bearer",
+      expiry_date: Date.now() + 365 * 24 * 60 * 60 * 1000,
+    }));
+  }
+
   try {
     gmailClient = new GmailClient(accountId);
     await gmailClient.connect();
     console.error("Gmail client connected");
-  } catch {
-    // When running against Archal twins (via proxy), Gmail credentials aren't
-    // needed — the proxy intercepts all gmail.googleapis.com traffic. The twin
-    // handles requests without OAuth. Tools that call ctx.gmail() will still
-    // work because the HTTP calls route through the proxy.
-    console.error(
-      "Gmail connect skipped (no credentials). Twin proxy will handle API calls.",
-    );
+  } catch (err) {
+    console.error("Gmail connect failed:", err instanceof Error ? err.message : err);
     gmailClient = null;
   }
 

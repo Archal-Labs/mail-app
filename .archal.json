@@ -1,6 +1,7 @@
 {
   "title": "Exo Mail Agent",
-  "agent": "npx tsx src/headless.ts",
+  "agent": "npx tsx --import ./src/headless-register.ts src/headless.ts",
   "twins": ["google-workspace"],
+  "agentModel": "claude-sonnet-4-6",
   "seeds": { "google-workspace": "gmail-busy-inbox" }
 }

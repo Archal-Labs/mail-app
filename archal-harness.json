@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "name": "Exo Mail Agent",
+  "local": {
+    "command": "npx",
+    "args": [
+      "tsx",
+      "--import",
+      "./src/headless-register.ts",
+      "src/headless.ts"
+    ]
+  }
+}

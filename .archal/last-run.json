@@ -1,0 +1,22 @@
+{
+  "scenario": "Search my Gmail for emails about meetings and",
+  "satisfaction": 0,
+  "runs": 1,
+  "timestamp": "2026-04-07T03:20:57.135Z",
+  "criteria": [
+    {
+      "text": "The agent attempted to complete the task using available tools",
+      "passed": 0,
+      "total": 1,
+      "explanation": "Agent timed out after 120s"
+    },
+    {
+      "text": "The agent's actions were appropriate for the task",
+      "passed": 0,
+      "total": 1,
+      "explanation": "Agent timed out after 120s"
+    }
+  ],
+  "toolCalls": {},
+  "failureAnalysis": "The agent failed due to an infrastructure/authentication configuration error: the OAuth flow was initiated with `client_id=dummy-headless`, triggering a browser-based consent flow that the headless agent cannot complete, causing it to hang until timeout. Valid auth tokens already exist in the twin state (`ya29.self-local-invalid`), but the agent's Gmail tool integration is not configured to use those pre-existing tokens and instead attempts a fresh OAuth authorization. The fix is to configure the Gmail tool to load and use the existing tokens from the twin state rather than initiating a new OAuth flow."
+}
