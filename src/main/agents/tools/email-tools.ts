@@ -468,7 +468,7 @@ const searchGmail: ToolDefinition<{ accountId: string; query: string; maxResults
       .describe("Maximum number of results to return (default 10, max 25)"),
   }),
   async execute(input, ctx) {
-    const limit = Math.min(input.maxResults ?? 3, 3);
+    const limit = Math.min(input.maxResults ?? 10, 25);
 
     // Search Gmail API — returns { results, nextPageToken }
     const searchResult = (await ctx.gmail("searchEmails", input.accountId, input.query, limit)) as {
