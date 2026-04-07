@@ -14,6 +14,9 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { AgentOrchestrator } from "./main/agents/orchestrator";
 import { initDatabase } from "./main/db";
 import * as db from "./main/db";
@@ -26,6 +29,57 @@ import type {
   NetFetchResult,
 } from "./main/agents/types";
 import type { AgentContext } from "./shared/agent-types";
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+/** Create an isolated data dir with dummy OAuth creds so the Gmail client
+ *  doesn't trigger an interactive browser flow. Sets EXO_DATA_DIR so the
+ *  electron shim picks it up. Returns the temp dir path for cleanup. */
+function initIsolatedDataDir(accountId: string): string {
+  const dir = process.env["EXO_DATA_DIR"] || join(tmpdir(), `archal-exo-headless-${Date.now()}`);
+  process.env["EXO_DATA_DIR"] = dir;
+
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+  const credFile = join(dir, "credentials.json");
+  if (!existsSync(credFile)) {
+    writeFileSync(credFile, JSON.stringify({ client_id: "archal-headless", client_secret: "archal-headless" }));
+  }
+
+  const tokFile = accountId === "default" ? join(dir, "tokens.json") : join(dir, `tokens-${accountId}.json`);
+  // Always write tokens to ensure a valid future expiry
+  writeFileSync(tokFile, JSON.stringify({
+    access_token: "ya29.self-local-invalid",
+    refresh_token: "archal-headless-proxy-refresh",
+    token_type: "Bearer",
+    expiry_date: Date.now() + 365 * 24 * 60 * 60 * 1000,
+  }));
+
+  return dir;
+}
+
+/** Best-effort cleanup of the isolated data dir on exit. */
+function cleanupOnExit(dir: string): void {
+  const cleanup = () => {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  };
+  process.on("exit", cleanup);
+  process.on("SIGINT", () => { cleanup(); process.exit(130); });
+  process.on("SIGTERM", () => { cleanup(); process.exit(143); });
+}
+
+/** Create a typed proxy that forwards method calls to a module/instance. */
+function makeProxy<T extends Record<string, unknown>>(
+  target: T | null,
+  label: string,
+): (method: string, ...args: unknown[]) => unknown {
+  return (method: string, ...args: unknown[]) => {
+    if (!target) throw new Error(`${label} method "${method}" called but no ${label} available.`);
+    const fn = target[method];
+    if (typeof fn !== "function") throw new Error(`Unknown ${label} method: ${method}`);
+    return (fn as (...a: unknown[]) => unknown).call(target, ...args);
+  };
+}
 
 async function main(): Promise<void> {
   // ── Preflight check ─────────────────────────────────────────────────
@@ -51,51 +105,25 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // ── Isolated data dir ───────────────────────────────────────────────
+  // Write dummy OAuth credentials to a temp dir instead of ~/.exo so we
+  // never corrupt the user's real Exo credentials.
+
+  const accountId = process.env["EXO_ACCOUNT_ID"] ?? "default";
+  const dataDir = initIsolatedDataDir(accountId);
+  cleanupOnExit(dataDir);
+
   // ── Initialize database ─────────────────────────────────────────────
 
   initDatabase();
 
-  // Direct db proxy — calls db module functions without IPC
-  const dbProxy: OrchestratorDeps["dbProxy"] = async (
-    method: string,
-    ...args: unknown[]
-  ) => {
-    const dbModule = db as Record<string, (...a: unknown[]) => unknown>;
-    const fn = dbModule[method];
-    if (typeof fn !== "function") {
-      throw new Error(`Unknown db method: ${method}`);
-    }
-    return fn(...args);
-  };
+  const dbProxy: OrchestratorDeps["dbProxy"] = makeProxy(
+    db as unknown as Record<string, unknown>, "db",
+  ) as OrchestratorDeps["dbProxy"];
 
   // ── Initialize Gmail client ─────────────────────────────────────────
 
-  const accountId = process.env["EXO_ACCOUNT_ID"] ?? "default";
   let gmailClient: GmailClient | null = null;
-
-  // Ensure dummy OAuth credentials + tokens exist so the Gmail client
-  // doesn't trigger an interactive browser OAuth flow. When running behind
-  // Archal's TLS proxy, all gmail.googleapis.com calls route to the twin
-  // which doesn't check OAuth — the token values are irrelevant.
-  {
-    const { writeFileSync: _wfs, existsSync: _exists, mkdirSync: _mkdir } = await import("fs");
-    const { join: _join } = await import("path");
-    const { homedir: _home } = await import("os");
-    const _dir = _join(_home(), ".exo");
-    const _cred = _join(_dir, "credentials.json");
-    const _tok = accountId === "default" ? _join(_dir, "tokens.json") : _join(_dir, `tokens-${accountId}.json`);
-    if (!_exists(_dir)) _mkdir(_dir, { recursive: true });
-    if (!_exists(_cred)) {
-      _wfs(_cred, JSON.stringify({ client_id: "archal-headless", client_secret: "archal-headless" }));
-    }
-    // Always write tokens to ensure a valid future expiry
-    _wfs(_tok, JSON.stringify({
-      access_token: "ya29.self-local-invalid",
-      refresh_token: "archal-headless-proxy-refresh",
-      token_type: "Bearer",
-      expiry_date: Date.now() + 365 * 24 * 60 * 60 * 1000,
-    }));
-  }
 
   try {
     gmailClient = new GmailClient(accountId);
@@ -106,27 +134,13 @@ async function main(): Promise<void> {
     gmailClient = null;
   }
 
-  // Direct gmail proxy — calls GmailClient methods without IPC.
-  // When gmailClient is null (no credentials, running against twins),
-  // we still try to use it — tools may not call gmail methods at all
-  // if the twin provides MCP tools directly.
   const gmailProxy: OrchestratorDeps["gmailProxy"] = async (
     method: string,
     _accountId: string,
     ...args: unknown[]
   ) => {
-    if (!gmailClient) {
-      throw new Error(
-        `Gmail method "${method}" called but no Gmail client available. ` +
-        `Ensure OAuth credentials exist or run against an Archal twin.`,
-      );
-    }
-    const fn = (gmailClient as unknown as Record<string, unknown>)[method];
-    if (typeof fn !== "function") {
-      throw new Error(`Unknown Gmail method: ${method}`);
-    }
-    // Bind to gmailClient so `this` is correct inside the method
-    return (fn as (...a: unknown[]) => unknown).call(gmailClient, ...args);
+    const proxy = makeProxy(gmailClient as unknown as Record<string, unknown> | null, "Gmail");
+    return proxy(method, ...args);
   };
 
   // ── Net fetch proxy ─────────────────────────────────────────────────
@@ -179,8 +193,7 @@ async function main(): Promise<void> {
   const mcpConfigPath = process.env["ARCHAL_MCP_CONFIG"]?.trim();
   if (mcpConfigPath) {
     try {
-      const { readFileSync: readMcp } = await import("fs");
-      const mcpConfig = JSON.parse(readMcp(mcpConfigPath, "utf-8"));
+      const mcpConfig = JSON.parse(readFileSync(mcpConfigPath, "utf-8"));
       if (mcpConfig?.mcpServers && typeof mcpConfig.mcpServers === "object") {
         mcpServers = mcpConfig.mcpServers;
         console.error(`Loaded ${Object.keys(mcpServers).length} MCP server(s) from archal config`);

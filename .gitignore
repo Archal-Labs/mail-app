@@ -61,3 +61,7 @@ src/agents-private/
 
 # gstack QA reports
 .gstack/
+
+# Archal test runner
+.archal/
+archal-harness.json
