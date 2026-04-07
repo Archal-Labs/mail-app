@@ -90,7 +90,7 @@ async function main(): Promise<void> {
     }
     // Always write tokens to ensure a valid future expiry
     _wfs(_tok, JSON.stringify({
-      access_token: "archal-headless-proxy-token",
+      access_token: "ya29.self-local-invalid",
       refresh_token: "archal-headless-proxy-refresh",
       token_type: "Bearer",
       expiry_date: Date.now() + 365 * 24 * 60 * 60 * 1000,
@@ -121,15 +121,12 @@ async function main(): Promise<void> {
         `Ensure OAuth credentials exist or run against an Archal twin.`,
       );
     }
-    const client = gmailClient as unknown as Record<
-      string,
-      (...a: unknown[]) => unknown
-    >;
-    const fn = client[method];
+    const fn = (gmailClient as unknown as Record<string, unknown>)[method];
     if (typeof fn !== "function") {
       throw new Error(`Unknown Gmail method: ${method}`);
     }
-    return fn(...args);
+    // Bind to gmailClient so `this` is correct inside the method
+    return (fn as (...a: unknown[]) => unknown).call(gmailClient, ...args);
   };
 
   // ── Net fetch proxy ─────────────────────────────────────────────────
@@ -176,6 +173,23 @@ async function main(): Promise<void> {
 
   // ── Build config ────────────────────────────────────────────────────
 
+  // If archal provided MCP server config, include it so the agent
+  // can use twin tools alongside its built-in email tools.
+  let mcpServers: AgentFrameworkConfig["mcpServers"] | undefined;
+  const mcpConfigPath = process.env["ARCHAL_MCP_CONFIG"]?.trim();
+  if (mcpConfigPath) {
+    try {
+      const { readFileSync: readMcp } = await import("fs");
+      const mcpConfig = JSON.parse(readMcp(mcpConfigPath, "utf-8"));
+      if (mcpConfig?.mcpServers && typeof mcpConfig.mcpServers === "object") {
+        mcpServers = mcpConfig.mcpServers;
+        console.error(`Loaded ${Object.keys(mcpServers).length} MCP server(s) from archal config`);
+      }
+    } catch (err) {
+      console.error("Failed to load MCP config:", err instanceof Error ? err.message : err);
+    }
+  }
+
   const config: AgentFrameworkConfig = {
     model:
       process.env["ARCHAL_ENGINE_MODEL"] ??
@@ -183,6 +197,7 @@ async function main(): Promise<void> {
       "claude-sonnet-4-6",
     anthropicApiKey:
       process.env["ANTHROPIC_API_KEY"] ?? process.env["EXO_API_KEY"],
+    mcpServers,
   };
 
   // ── Build orchestrator deps ─────────────────────────────────────────
