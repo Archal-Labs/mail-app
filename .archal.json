@@ -3,5 +3,7 @@
   "agent": "npx tsx --import ./src/headless-register.ts src/headless.ts",
   "twins": ["google-workspace"],
   "agentModel": "claude-sonnet-4-6",
-  "seeds": { "google-workspace": "gmail-busy-inbox" }
+  "seeds": { "google-workspace": "assistant-baseline" },
+  "runs": 1,
+  "timeout": 60
 }
