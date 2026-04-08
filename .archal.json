@@ -1,0 +1,7 @@
+{
+  "title": "Exo Mail Agent",
+  "agent": "npx tsx --import ./src/headless-register.ts src/headless.ts",
+  "twins": ["google-workspace"],
+  "runs": 1,
+  "timeout": 120
+}
