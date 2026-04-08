@@ -4,16 +4,12 @@
  * This boots the same agent-worker runtime used in production and drives it
  * through the worker/coordinator message boundary in-process. The only thing
  * stubbed is the Electron host environment.
- *
- * Usage:
- *   npx tsx src/headless.ts
- *   npx tsx src/headless.ts "Archive all newsletters"
  */
 
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { initDatabase } from "./main/db";
 import * as db from "./main/db";
 import { GmailClient } from "./main/services/gmail-client";
@@ -26,62 +22,72 @@ import type {
 } from "./main/agents/types";
 import type { AgentContext, AgentTaskState } from "./shared/agent-types";
 
-class FakeMessagePort {
-  constructor(private readonly onMessage: (event: ScopedAgentEvent) => void) {}
-
-  postMessage(message: ScopedAgentEvent): void {
-    this.onMessage(message);
-  }
-
-  start(): void {}
-
-  close(): void {}
-}
-
-class FakeParentPort {
-  private messageHandler: ((event: { data: WorkerMessage; ports?: FakeMessagePort[] }) => void) | null =
-    null;
-
-  constructor(private readonly onWorkerMessage: (message: CoordinatorMessage) => void) {}
-
-  on(event: "message", handler: (event: { data: WorkerMessage; ports?: FakeMessagePort[] }) => void): void {
-    if (event === "message") {
-      this.messageHandler = handler;
-    }
-  }
-
-  postMessage(message: CoordinatorMessage): void {
-    this.onWorkerMessage(message);
-  }
-
-  dispatchToWorker(message: WorkerMessage, ports?: FakeMessagePort[]): void {
-    this.messageHandler?.({ data: message, ports });
-  }
-}
-
+type TerminalState = Exclude<AgentTaskState, "running">;
+type WorkerEvent = { data: WorkerMessage; ports?: FakeMessagePort[] };
+type FakeMessagePort = {
+  postMessage(message: ScopedAgentEvent): void;
+  start(): void;
+  close(): void;
+};
+type FakeParentPort = {
+  on(event: "message", handler: (event: WorkerEvent) => void): void;
+  postMessage(message: CoordinatorMessage): void;
+  dispatch(message: WorkerMessage, ports?: FakeMessagePort[]): void;
+};
 type HeadlessProcess = NodeJS.Process & { parentPort?: FakeParentPort };
+type HeadlessDir = { path: string; owned: boolean };
 
-/** Create an isolated data dir with dummy OAuth creds so the Gmail client
- *  doesn't trigger an interactive browser flow. Sets EXO_DATA_DIR so the
- *  electron shim picks it up. Returns the temp dir path for cleanup. */
-function initIsolatedDataDir(accountId: string): string {
-  const dir = process.env["EXO_DATA_DIR"] || join(tmpdir(), `archal-exo-headless-${Date.now()}`);
+function formatError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function createFakeMessagePort(onMessage: (event: ScopedAgentEvent) => void): FakeMessagePort {
+  return {
+    postMessage: onMessage,
+    start() {},
+    close() {},
+  };
+}
+
+function createFakeParentPort(onWorkerMessage: (message: CoordinatorMessage) => void): FakeParentPort {
+  let messageHandler: ((event: WorkerEvent) => void) | null = null;
+
+  return {
+    on(event, handler) {
+      if (event === "message") {
+        messageHandler = handler;
+      }
+    },
+    postMessage(message) {
+      onWorkerMessage(message);
+    },
+    dispatch(message, ports) {
+      messageHandler?.({ data: message, ports });
+    },
+  };
+}
+
+function ensureHeadlessDataDir(accountId: string): HeadlessDir {
+  const existingDir = process.env["EXO_DATA_DIR"]?.trim();
+  const dir = existingDir || join(tmpdir(), `archal-exo-headless-${Date.now()}`);
   process.env["EXO_DATA_DIR"] = dir;
 
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
 
-  const credFile = join(dir, "credentials.json");
-  if (!existsSync(credFile)) {
+  const credentialsPath = join(dir, "credentials.json");
+  if (!existsSync(credentialsPath)) {
     writeFileSync(
-      credFile,
+      credentialsPath,
       JSON.stringify({ client_id: "archal-headless", client_secret: "archal-headless" }),
     );
   }
 
-  const tokFile =
+  const tokenPath =
     accountId === "default" ? join(dir, "tokens.json") : join(dir, `tokens-${accountId}.json`);
   writeFileSync(
-    tokFile,
+    tokenPath,
     JSON.stringify({
       access_token: "ya29.self-local-invalid",
       refresh_token: "archal-headless-proxy-refresh",
@@ -90,13 +96,17 @@ function initIsolatedDataDir(accountId: string): string {
     }),
   );
 
-  return dir;
+  return { path: dir, owned: !existingDir };
 }
 
-function cleanupOnExit(dir: string): void {
+function installCleanup(dataDir: HeadlessDir): void {
+  if (!dataDir.owned) {
+    return;
+  }
+
   const cleanup = () => {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dataDir.path, { recursive: true, force: true });
     } catch {
       /* best-effort */
     }
@@ -113,27 +123,69 @@ function cleanupOnExit(dir: string): void {
   });
 }
 
-function buildFrameworkConfig(): AgentFrameworkConfig {
-  let mcpServers: AgentFrameworkConfig["mcpServers"] | undefined;
+function loadMcpServers(): AgentFrameworkConfig["mcpServers"] | undefined {
   const mcpConfigPath = process.env["ARCHAL_MCP_CONFIG"]?.trim();
-
-  if (mcpConfigPath) {
-    try {
-      const mcpConfig = JSON.parse(readFileSync(mcpConfigPath, "utf-8"));
-      if (mcpConfig?.mcpServers && typeof mcpConfig.mcpServers === "object") {
-        mcpServers = mcpConfig.mcpServers;
-        console.error(`Loaded ${Object.keys(mcpServers).length} MCP server(s) from archal config`);
-      }
-    } catch (err) {
-      console.error("Failed to load MCP config:", err instanceof Error ? err.message : err);
-    }
+  if (!mcpConfigPath) {
+    return undefined;
   }
 
+  try {
+    const parsed = JSON.parse(readFileSync(mcpConfigPath, "utf-8"));
+    if (parsed?.mcpServers && typeof parsed.mcpServers === "object") {
+      console.error(`Loaded ${Object.keys(parsed.mcpServers).length} MCP server(s) from archal config`);
+      return parsed.mcpServers;
+    }
+  } catch (err) {
+    console.error("Failed to load MCP config:", formatError(err));
+  }
+
+  return undefined;
+}
+
+function buildFrameworkConfig(): AgentFrameworkConfig {
   return {
     model: process.env["ARCHAL_ENGINE_MODEL"] ?? process.env["EXO_MODEL"] ?? "claude-sonnet-4-6",
     anthropicApiKey: process.env["ANTHROPIC_API_KEY"] ?? process.env["EXO_API_KEY"],
-    mcpServers,
+    mcpServers: loadMcpServers(),
   };
+}
+
+async function invokeMethod(
+  target: Record<string, unknown> | null,
+  label: string,
+  method: string,
+  args: unknown[],
+): Promise<unknown> {
+  if (!target) {
+    throw new Error(`${label} method "${method}" called but ${label} is unavailable.`);
+  }
+
+  const fn = target[method];
+  if (typeof fn !== "function") {
+    throw new Error(`Unknown ${label} method: ${method}`);
+  }
+
+  return await (fn as (...callArgs: unknown[]) => unknown).call(target, ...args);
+}
+
+function logEvent(event: ScopedAgentEvent): void {
+  switch (event.type) {
+    case "text_delta":
+      process.stderr.write(event.text);
+      return;
+    case "error":
+      process.stderr.write(`\n[error] ${event.message}\n`);
+      return;
+    case "tool_call_start":
+      process.stderr.write(`\n[tool] ${event.toolName}\n`);
+      return;
+    case "tool_call_end":
+      process.stderr.write(`[tool_result] ${JSON.stringify(event.result)}\n`);
+      return;
+    case "state":
+      process.stderr.write(`\n[state] ${event.state}\n`);
+      return;
+  }
 }
 
 async function createCoordinatorBridge(): Promise<FakeParentPort> {
@@ -147,168 +199,145 @@ async function createCoordinatorBridge(): Promise<FakeParentPort> {
     await gmailClient.connect();
     console.error("Gmail client connected");
   } catch (err) {
-    console.error("Gmail connect failed:", err instanceof Error ? err.message : err);
+    console.error("Gmail connect failed:", formatError(err));
   }
 
-  const sendDbResponse = (requestId: string, result: unknown): void => {
-    fakeParentPort.dispatchToWorker({ type: "db_response", requestId, result });
-  };
+  const respond = (() => {
+    let parentPort: FakeParentPort;
 
-  const sendDbError = (requestId: string, error: string): void => {
-    fakeParentPort.dispatchToWorker({ type: "db_error", requestId, error });
-  };
+    const send = (message: WorkerMessage): void => {
+      parentPort.dispatch(message);
+    };
 
-  const sendGmailResponse = (requestId: string, result: unknown): void => {
-    fakeParentPort.dispatchToWorker({ type: "gmail_response", requestId, result });
-  };
-
-  const sendGmailError = (requestId: string, error: string): void => {
-    fakeParentPort.dispatchToWorker({ type: "gmail_error", requestId, error });
-  };
-
-  const sendNetFetchResponse = (requestId: string, result: NetFetchResult): void => {
-    fakeParentPort.dispatchToWorker({ type: "net_fetch_response", requestId, result });
-  };
-
-  const sendNetFetchError = (requestId: string, error: string): void => {
-    fakeParentPort.dispatchToWorker({ type: "net_fetch_error", requestId, error });
-  };
-
-  const handleDbRequest = (requestId: string, method: string, args: unknown[]): void => {
-    const fn = (db as Record<string, unknown>)[method];
-    if (typeof fn !== "function") {
-      sendDbError(requestId, `Unknown DB method: ${method}`);
-      return;
-    }
-
-    try {
-      const result = (fn as (...callArgs: unknown[]) => unknown)(...args);
-      if (result instanceof Promise) {
-        result.then((value) => sendDbResponse(requestId, value)).catch((err) => {
-          sendDbError(requestId, err instanceof Error ? err.message : String(err));
-        });
-        return;
+    const sendRpcResult = async (
+      kind: "db" | "gmail",
+      requestId: string,
+      work: Promise<unknown>,
+    ): Promise<void> => {
+      try {
+        send({ type: `${kind}_response`, requestId, result: await work } as WorkerMessage);
+      } catch (err) {
+        send({ type: `${kind}_error`, requestId, error: formatError(err) } as WorkerMessage);
       }
-      sendDbResponse(requestId, result);
-    } catch (err) {
-      sendDbError(requestId, err instanceof Error ? err.message : String(err));
-    }
-  };
+    };
 
-  const fakeParentPort = new FakeParentPort((message) => {
-    switch (message.type) {
-      case "db_request":
-        handleDbRequest(message.requestId, message.method, message.args);
-        break;
-      case "gmail_request":
-        handleGmailRequest(message.requestId, message.method, message.args);
-        break;
-      case "net_fetch_request":
-        void handleNetFetchRequest(message.requestId, message.url, message.options);
-        break;
-      case "confirmation_request":
-        process.stderr.write(`[auto-approve] ${message.toolName}: ${message.description}\n`);
-        fakeParentPort.dispatchToWorker({
-          type: "confirm",
-          toolCallId: message.toolCallId,
-          approved: true,
+    const sendNetFetchResult = async (
+      requestId: string,
+      url: string,
+      options: { method: string; headers?: Record<string, string>; body?: string },
+    ): Promise<void> => {
+      try {
+        const response = await fetch(url, {
+          method: options.method,
+          headers: options.headers,
+          body: options.body,
         });
-        break;
-      case "providers_list":
-      case "provider_loaded":
-      case "provider_load_error":
-      case "provider_health":
-        break;
-    }
-  });
-
-  const handleGmailRequest = (requestId: string, method: string, args: unknown[]): void => {
-    if (!gmailClient) {
-      sendGmailError(requestId, `Gmail method "${method}" called but Gmail client is unavailable.`);
-      return;
-    }
-
-    try {
-      const fn = (gmailClient as unknown as Record<string, unknown>)[method];
-      if (typeof fn !== "function") {
-        sendGmailError(requestId, `Unknown Gmail method: ${method}`);
-        return;
-      }
-      const result = (fn as (...callArgs: unknown[]) => unknown).call(gmailClient, ...args);
-      if (result instanceof Promise) {
-        result.then((value) => sendGmailResponse(requestId, value)).catch((err) => {
-          sendGmailError(requestId, err instanceof Error ? err.message : String(err));
+        const headers: Record<string, string> = {};
+        response.headers.forEach((value, key) => {
+          headers[key] = value;
         });
-        return;
+        const result: NetFetchResult = {
+          status: response.status,
+          headers,
+          body: await response.text(),
+        };
+        send({ type: "net_fetch_response", requestId, result });
+      } catch (err) {
+        send({ type: "net_fetch_error", requestId, error: formatError(err) });
       }
-      sendGmailResponse(requestId, result);
-    } catch (err) {
-      sendGmailError(requestId, err instanceof Error ? err.message : String(err));
-    }
-  };
+    };
 
-  const handleNetFetchRequest = async (
-    requestId: string,
-    url: string,
-    options: { method: string; headers?: Record<string, string>; body?: string },
-  ): Promise<void> => {
-    try {
-      const response = await fetch(url, {
-        method: options.method,
-        headers: options.headers,
-        body: options.body,
-      });
-      const body = await response.text();
-      const headers: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        headers[key] = value;
-      });
-      sendNetFetchResponse(requestId, { status: response.status, headers, body });
-    } catch (err) {
-      sendNetFetchError(requestId, err instanceof Error ? err.message : String(err));
-    }
-  };
+    parentPort = createFakeParentPort((message) => {
+      switch (message.type) {
+        case "db_request":
+          void sendRpcResult(
+            "db",
+            message.requestId,
+            invokeMethod(db as Record<string, unknown>, "DB", message.method, message.args),
+          );
+          return;
+        case "gmail_request":
+          void sendRpcResult(
+            "gmail",
+            message.requestId,
+            invokeMethod(
+              gmailClient as unknown as Record<string, unknown> | null,
+              "Gmail",
+              message.method,
+              message.args,
+            ),
+          );
+          return;
+        case "net_fetch_request":
+          void sendNetFetchResult(message.requestId, message.url, message.options);
+          return;
+        case "confirmation_request":
+          process.stderr.write(`[auto-approve] ${message.toolName}: ${message.description}\n`);
+          send({
+            type: "confirm",
+            toolCallId: message.toolCallId,
+            approved: true,
+          });
+          return;
+        case "providers_list":
+        case "provider_loaded":
+        case "provider_load_error":
+        case "provider_health":
+          return;
+      }
+    });
 
-  (process as HeadlessProcess).parentPort = fakeParentPort;
-  return fakeParentPort;
+    return parentPort;
+  })();
+
+  (process as HeadlessProcess).parentPort = respond;
+  return respond;
 }
 
-function logEvent(event: ScopedAgentEvent): void {
-  if (event.type === "text_delta") {
-    process.stderr.write(event.text);
-    return;
-  }
+async function runTask(
+  parentPort: FakeParentPort,
+  task: string,
+  context: AgentContext,
+): Promise<{ state: TerminalState; error?: string }> {
+  const taskId = randomUUID();
 
-  if (event.type === "error") {
-    process.stderr.write(`\n[error] ${event.message}\n`);
-    return;
-  }
+  return await new Promise((resolve) => {
+    let finalError: string | undefined;
+    const port = createFakeMessagePort((event) => {
+      logEvent(event);
 
-  if (event.type === "tool_call_start") {
-    process.stderr.write(`\n[tool] ${event.toolName}\n`);
-    return;
-  }
+      if (event.type === "error") {
+        finalError = event.message;
+      }
 
-  if (event.type === "tool_call_end") {
-    process.stderr.write(`[tool_result] ${JSON.stringify(event.result)}\n`);
-    return;
-  }
+      if (
+        event.type === "state" &&
+        (event.state === "completed" || event.state === "failed" || event.state === "cancelled")
+      ) {
+        resolve(finalError ? { state: event.state, error: finalError } : { state: event.state });
+      }
+    });
 
-  if (event.type === "state") {
-    process.stderr.write(`\n[state] ${event.state}\n`);
-  }
+    parentPort.dispatch(
+      {
+        type: "run",
+        taskId,
+        providerIds: ["claude"],
+        prompt: task,
+        context,
+      },
+      [port],
+    );
+  });
 }
 
 async function main(): Promise<void> {
   const accountId = process.env["EXO_ACCOUNT_ID"] ?? "default";
-  const dataDir = initIsolatedDataDir(accountId);
-  cleanupOnExit(dataDir);
+  installCleanup(ensureHeadlessDataDir(accountId));
 
-  const fakeParentPort = await createCoordinatorBridge();
+  const parentPort = await createCoordinatorBridge();
   await import("./main/agents/agent-worker");
-
-  const config = buildFrameworkConfig();
-  fakeParentPort.dispatchToWorker({ type: "init", config });
+  parentPort.dispatch({ type: "init", config: buildFrameworkConfig() });
 
   if (process.env["ARCHAL_PREFLIGHT"] === "1") {
     console.error("Preflight: agent-worker boots OK");
@@ -322,61 +351,23 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const taskId = randomUUID();
-  const context: AgentContext = {
+  console.error(`Running task: ${task}`);
+  const result = await runTask(parentPort, task, {
     accountId,
     userEmail: process.env["EXO_USER_EMAIL"] ?? "user@example.com",
     userName: process.env["EXO_USER_NAME"] ?? "User",
-  };
-
-  let finalState: Exclude<AgentTaskState, "running"> | null = null;
-  let finalError: string | null = null;
-
-  const completion = new Promise<void>((resolve) => {
-    const port = new FakeMessagePort((event) => {
-      logEvent(event);
-
-      if (event.type === "error") {
-        finalError = event.message;
-      }
-
-      if (
-        event.type === "state" &&
-        (event.state === "completed" || event.state === "failed" || event.state === "cancelled")
-      ) {
-        finalState = event.state;
-        resolve();
-      }
-    });
-
-    fakeParentPort.dispatchToWorker(
-      {
-        type: "run",
-        taskId,
-        providerIds: ["claude"],
-        prompt: task,
-        context,
-      },
-      [port],
-    );
   });
-
-  console.error(`Running task: ${task}`);
-  await completion;
-
-  if (finalState === "completed") {
-    console.log(JSON.stringify({ status: "completed", taskId }));
-    return;
-  }
 
   console.log(
     JSON.stringify({
-      status: finalState ?? "failed",
-      taskId,
-      ...(finalError ? { error: finalError } : {}),
+      status: result.state,
+      ...(result.error ? { error: result.error } : {}),
     }),
   );
-  process.exit(finalState === "cancelled" ? 130 : 1);
+
+  if (result.state !== "completed") {
+    process.exit(result.state === "cancelled" ? 130 : 1);
+  }
 }
 
 main().catch((err) => {
