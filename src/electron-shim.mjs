@@ -29,11 +29,46 @@ export const shell = {
   },
 };
 
-export const net = { fetch: globalThis.fetch };
+export const net = {
+  fetch: globalThis.fetch,
+  isOnline: () => true,
+};
 export const session = {};
-export const ipcMain = { on() {}, handle() {} };
-export class BrowserWindow {}
-export const utilityProcess = { fork() {} };
+export const ipcMain = { on() {}, handle() {}, removeHandler() {} };
+export const powerMonitor = { on() {}, off() {} };
+
+class StubMessagePort {
+  on() {}
+  once() {}
+  postMessage() {}
+  start() {}
+  close() {}
+}
+
+export class MessageChannelMain {
+  constructor() {
+    this.port1 = new StubMessagePort();
+    this.port2 = new StubMessagePort();
+  }
+}
+
+export class BrowserWindow {
+  static getAllWindows() {
+    return [];
+  }
+}
+
+export const utilityProcess = {
+  fork() {
+    return {
+      stdout: { on() {} },
+      stderr: { on() {} },
+      on() {},
+      postMessage() {},
+      kill() {},
+    };
+  },
+};
 
 // Common Electron APIs that upstream might import in the future.
 // Stubbed proactively to avoid headless crashes.
@@ -53,7 +88,7 @@ export const electronApp = {};
 export const optimizer = {};
 
 export default {
-  app, shell, net, session, ipcMain, BrowserWindow, utilityProcess,
+  app, shell, net, session, ipcMain, powerMonitor, MessageChannelMain, BrowserWindow, utilityProcess,
   dialog, Menu, Tray, nativeTheme,
   is, electronApp, optimizer,
 };

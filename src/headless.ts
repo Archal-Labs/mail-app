@@ -17,10 +17,6 @@ import { randomUUID } from "node:crypto";
 import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AgentOrchestrator } from "./main/agents/orchestrator";
-import { initDatabase } from "./main/db";
-import * as db from "./main/db";
-import { GmailClient } from "./main/services/gmail-client";
 import type {
   OrchestratorDeps,
   AgentFrameworkConfig,
@@ -28,7 +24,58 @@ import type {
   ConfirmationDetails,
   NetFetchResult,
 } from "./main/agents/types";
+import type { GmailClient } from "./main/services/gmail-client";
 import type { AgentContext } from "./shared/agent-types";
+import {
+  ConfigSchema,
+  DEFAULT_MODEL_CONFIG,
+  DEFAULT_STYLE_PROMPT,
+  resolveModelId,
+  type Config,
+  type DashboardEmail,
+  type Email,
+  type GeneratedDraftResponse,
+  type AnalysisResult,
+} from "./shared/types";
+
+type DbModule = typeof import("./main/db");
+
+let dbModulePromise: Promise<DbModule> | null = null;
+let styleProfilerPromise: Promise<typeof import("./main/services/style-profiler")> | null = null;
+let memoryContextPromise: Promise<typeof import("./main/services/memory-context")> | null = null;
+let draftSyncPromise: Promise<typeof import("./main/services/gmail-draft-sync")> | null = null;
+let orchestratorPromise: Promise<typeof import("./main/agents/orchestrator")> | null = null;
+let gmailClientPromise: Promise<typeof import("./main/services/gmail-client")> | null = null;
+
+async function getDbModule(): Promise<DbModule> {
+  dbModulePromise ??= import("./main/db");
+  return dbModulePromise;
+}
+
+async function getStyleProfilerModule(): Promise<typeof import("./main/services/style-profiler")> {
+  styleProfilerPromise ??= import("./main/services/style-profiler");
+  return styleProfilerPromise;
+}
+
+async function getMemoryContextModule(): Promise<typeof import("./main/services/memory-context")> {
+  memoryContextPromise ??= import("./main/services/memory-context");
+  return memoryContextPromise;
+}
+
+async function getDraftSyncModule(): Promise<typeof import("./main/services/gmail-draft-sync")> {
+  draftSyncPromise ??= import("./main/services/gmail-draft-sync");
+  return draftSyncPromise;
+}
+
+async function getOrchestratorModule(): Promise<typeof import("./main/agents/orchestrator")> {
+  orchestratorPromise ??= import("./main/agents/orchestrator");
+  return orchestratorPromise;
+}
+
+async function getGmailClientModule(): Promise<typeof import("./main/services/gmail-client")> {
+  gmailClientPromise ??= import("./main/services/gmail-client");
+  return gmailClientPromise;
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -81,6 +128,260 @@ function makeProxy<T extends Record<string, unknown>>(
   };
 }
 
+function logHeadlessEvent(event: ScopedAgentEvent): void {
+  switch (event.type) {
+    case "text_delta":
+      process.stderr.write(`[text] ${event.text}\n`);
+      return;
+    case "user_message":
+      process.stderr.write(`[user] ${event.text}\n`);
+      return;
+    case "tool_call_start":
+      process.stderr.write(
+        `[tool:start] ${event.toolName} ${JSON.stringify(event.input)}\n`,
+      );
+      return;
+    case "tool_call_end":
+      process.stderr.write(
+        `[tool:end] ${event.toolCallId} ${JSON.stringify(event.result)}\n`,
+      );
+      return;
+    case "tool_call_pending":
+      process.stderr.write(
+        `[tool:pending] ${event.toolName} ${event.pendingState}\n`,
+      );
+      return;
+    case "confirmation_required":
+      process.stderr.write(
+        `[confirm] ${event.toolName}: ${event.description}\n`,
+      );
+      return;
+    case "state":
+      process.stderr.write(`[state] ${event.state}${event.message ? ` ${event.message}` : ""}\n`);
+      return;
+    case "error":
+      process.stderr.write(`[error] ${event.message}\n`);
+      return;
+    case "done":
+      process.stderr.write(`[done] ${event.summary}\n`);
+      return;
+  }
+}
+
+let cachedHeadlessConfig: Config | null = null;
+
+function getHeadlessConfig(): Config {
+  if (cachedHeadlessConfig) return cachedHeadlessConfig;
+
+  const configPath = join(process.env["EXO_DATA_DIR"] ?? process.cwd(), "exo-config.json");
+  let storedConfig: unknown = {};
+
+  if (existsSync(configPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(configPath, "utf-8"));
+      storedConfig =
+        parsed && typeof parsed === "object" && "config" in parsed
+          ? (parsed as { config?: unknown }).config ?? {}
+          : parsed;
+    } catch (err) {
+      console.error("Failed to read Exo config:", err instanceof Error ? err.message : err);
+    }
+  }
+
+  const config = ConfigSchema.parse(storedConfig ?? {});
+  if (!config.anthropicApiKey) {
+    config.anthropicApiKey = process.env["ANTHROPIC_API_KEY"] ?? process.env["EXO_API_KEY"];
+  }
+
+  cachedHeadlessConfig = config;
+  return config;
+}
+
+function getHeadlessModelId(feature: keyof typeof DEFAULT_MODEL_CONFIG): string {
+  const config = getHeadlessConfig();
+  const modelConfig = { ...DEFAULT_MODEL_CONFIG, ...config.modelConfig };
+  return resolveModelId(modelConfig[feature]);
+}
+
+function extractEmail(field: string): string {
+  const match = field.match(/<([^>]+)>/) ?? field.match(/([^\s<]+@[^\s>]+)/);
+  return match ? match[1] : field;
+}
+
+async function generateDraftHeadlessly(
+  emailId: string,
+  requestedAccountId: string,
+  getGmailClient: (accountId: string) => Promise<GmailClient | null>,
+  instructions?: string,
+): Promise<GeneratedDraftResponse> {
+  const db = await getDbModule();
+  const email = db.getEmail(emailId);
+  if (!email) throw new Error(`Email not found: ${emailId}`);
+
+  const config = getHeadlessConfig();
+  const emailAccountId = requestedAccountId || email.accountId || "default";
+  const recipientEmail = extractEmail(email.from);
+  const gmailClient = recipientEmail ? await getGmailClient(emailAccountId) : null;
+  const { buildStyleContext } = await getStyleProfilerModule();
+  const styleContext = recipientEmail
+    ? await buildStyleContext(
+        recipientEmail,
+        emailAccountId,
+        config.stylePrompt ?? DEFAULT_STYLE_PROMPT,
+        gmailClient,
+      )
+    : "";
+  const { buildMemoryContext } = await getMemoryContextModule();
+  const memoryContext = recipientEmail
+    ? buildMemoryContext(recipientEmail.toLowerCase(), emailAccountId)
+    : "";
+
+  let prompt = config.draftPrompt;
+  if (styleContext) prompt = `${styleContext}\n\n${prompt}`;
+  if (memoryContext) prompt = `${memoryContext}\n\n${prompt}`;
+  if (instructions) prompt = `${prompt}\n\nADDITIONAL INSTRUCTIONS:\n${instructions}`;
+
+  const emailForDraft: Email = {
+    id: email.id,
+    threadId: email.threadId,
+    subject: email.subject,
+    from: email.from,
+    to: email.to,
+    cc: email.cc,
+    date: email.date,
+    body: email.body ?? "",
+    snippet: email.snippet,
+  };
+
+  let analysis: AnalysisResult;
+  if (email.analysis) {
+    analysis = {
+      needs_reply: email.analysis.needsReply,
+      reason: email.analysis.reason,
+      priority: email.analysis.priority,
+    };
+  } else {
+    const { EmailAnalyzer } = await import("./main/services/email-analyzer");
+    const accounts = db.getAccounts();
+    const userEmail = accounts.find((account) => account.id === emailAccountId)?.email;
+    const analyzer = new EmailAnalyzer(
+      getHeadlessModelId("analysis"),
+      config.analysisPrompt ?? undefined,
+    );
+    analysis = await analyzer.analyze(emailForDraft, userEmail, emailAccountId);
+    db.saveAnalysis(emailId, analysis.needs_reply, analysis.reason, analysis.priority);
+  }
+
+  const userEmail = db.getAccounts().find((account) => account.id === emailAccountId)?.email;
+  const { DraftGenerator } = await import("./main/services/draft-generator");
+  const generator = new DraftGenerator(
+    getHeadlessModelId("drafts"),
+    prompt,
+    getHeadlessModelId("calendaring"),
+  );
+  const result = await generator.generateDraft(emailForDraft, analysis, config.ea, {
+    enableSenderLookup: config.enableSenderLookup ?? true,
+    userEmail,
+  });
+
+  const { saveDraftAndSync } = await getDraftSyncModule();
+  saveDraftAndSync(emailId, result.body, "pending", result.cc, result.bcc);
+  return result;
+}
+
+async function generateNewEmailHeadlessly(
+  requestedAccountId: string,
+  to: string[],
+  subject: string,
+  instructions: string,
+  getGmailClient: (accountId: string) => Promise<GmailClient | null>,
+): Promise<GeneratedDraftResponse> {
+  const config = getHeadlessConfig();
+  const primaryRecipient = to[0] ?? "";
+  const primaryEmail = extractEmail(primaryRecipient);
+  const gmailClient = primaryEmail ? await getGmailClient(requestedAccountId) : null;
+  const { buildStyleContext } = await getStyleProfilerModule();
+  const styleContext = primaryEmail
+    ? await buildStyleContext(
+        primaryEmail,
+        requestedAccountId,
+        config.stylePrompt ?? DEFAULT_STYLE_PROMPT,
+        gmailClient,
+      )
+    : "";
+
+  let prompt = config.draftPrompt;
+  if (styleContext) prompt = `${styleContext}\n\n${prompt}`;
+
+  const { DraftGenerator } = await import("./main/services/draft-generator");
+  const generator = new DraftGenerator(
+    getHeadlessModelId("drafts"),
+    prompt,
+    getHeadlessModelId("calendaring"),
+  );
+
+  return generator.composeNewEmail(to, subject, instructions, {
+    enableSenderLookup: config.enableSenderLookup ?? true,
+  });
+}
+
+async function generateForwardHeadlessly(
+  emailId: string,
+  requestedAccountId: string,
+  instructions: string,
+  to: string[] | undefined,
+  cc: string[] | undefined,
+  bcc: string[] | undefined,
+  getGmailClient: (accountId: string) => Promise<GmailClient | null>,
+): Promise<GeneratedDraftResponse> {
+  const db = await getDbModule();
+  const email = db.getEmail(emailId);
+  if (!email) throw new Error(`Email not found: ${emailId}`);
+
+  const config = getHeadlessConfig();
+  const primaryRecipient = to?.[0] ?? "";
+  const primaryEmail = extractEmail(primaryRecipient);
+  const gmailClient = primaryEmail ? await getGmailClient(requestedAccountId) : null;
+  const { buildStyleContext } = await getStyleProfilerModule();
+  const styleContext = primaryEmail
+    ? await buildStyleContext(
+        primaryEmail,
+        requestedAccountId,
+        config.stylePrompt ?? DEFAULT_STYLE_PROMPT,
+        gmailClient,
+      )
+    : "";
+
+  let prompt = config.draftPrompt;
+  if (styleContext) prompt = `${styleContext}\n\n${prompt}`;
+
+  const { DraftGenerator } = await import("./main/services/draft-generator");
+  const emailForDraft: Email = {
+    id: email.id,
+    threadId: email.threadId,
+    subject: email.subject,
+    from: email.from,
+    to: email.to,
+    cc: email.cc,
+    date: email.date,
+    body: email.body ?? "",
+    snippet: email.snippet,
+  };
+
+  const generator = new DraftGenerator(
+    getHeadlessModelId("drafts"),
+    prompt,
+    getHeadlessModelId("calendaring"),
+  );
+  const result = await generator.generateForward(emailForDraft, instructions, {
+    enableSenderLookup: config.enableSenderLookup ?? true,
+  });
+
+  const { saveDraftAndSync } = await getDraftSyncModule();
+  saveDraftAndSync(emailId, result.body, "pending", cc, bcc, "forward", to);
+  return result;
+}
+
 async function main(): Promise<void> {
   // ── Preflight check ─────────────────────────────────────────────────
   // Archal runs a preflight boot check before provisioning twins.
@@ -115,11 +416,8 @@ async function main(): Promise<void> {
 
   // ── Initialize database ─────────────────────────────────────────────
 
-  initDatabase();
-
-  const dbProxy: OrchestratorDeps["dbProxy"] = makeProxy(
-    db as unknown as Record<string, unknown>, "db",
-  ) as OrchestratorDeps["dbProxy"];
+  const db = await getDbModule();
+  db.initDatabase();
 
   // ── Initialize Gmail client ─────────────────────────────────────────
 
@@ -134,6 +432,7 @@ async function main(): Promise<void> {
     initIsolatedDataDir(requestedAccountId);
 
     try {
+      const { GmailClient } = await getGmailClientModule();
       const client = new GmailClient(requestedAccountId);
       await client.connect();
       gmailClients.set(requestedAccountId, client);
@@ -149,6 +448,33 @@ async function main(): Promise<void> {
   };
 
   await getGmailClient(accountId);
+  const { saveDraftAndSync } = await getDraftSyncModule();
+
+  const headlessDbMethods = {
+    ...db,
+    saveDraftAndSync,
+    generateDraft: async (emailId: string, requestedAccountId: string, instructions?: string) =>
+      generateDraftHeadlessly(emailId, requestedAccountId, getGmailClient, instructions),
+    generateNewEmail: async (
+      requestedAccountId: string,
+      to: string[],
+      subject: string,
+      instructions: string,
+    ) => generateNewEmailHeadlessly(requestedAccountId, to, subject, instructions, getGmailClient),
+    generateForward: async (
+      emailId: string,
+      requestedAccountId: string,
+      instructions: string,
+      to?: string[],
+      cc?: string[],
+      bcc?: string[],
+    ) => generateForwardHeadlessly(emailId, requestedAccountId, instructions, to, cc, bcc, getGmailClient),
+  } satisfies Record<string, unknown>;
+
+  const dbProxy: OrchestratorDeps["dbProxy"] = async (method: string, ...args: unknown[]) => {
+    const proxy = makeProxy(headlessDbMethods, "db");
+    return proxy(method, ...args);
+  };
 
   const gmailProxy: OrchestratorDeps["gmailProxy"] = async (
     method: string,
@@ -182,17 +508,7 @@ async function main(): Promise<void> {
   // ── Stub Electron dependencies ──────────────────────────────────────
 
   const emitToRenderer = (_taskId: string, event: ScopedAgentEvent): void => {
-    if (event.type === "message") {
-      const text =
-        typeof event.data === "string"
-          ? event.data
-          : JSON.stringify(event.data);
-      process.stderr.write(`[agent] ${text}\n`);
-    } else if (event.type === "state") {
-      process.stderr.write(`[state] ${String((event as { state: string }).state)}\n`);
-    } else if (event.type === "tool_use") {
-      process.stderr.write(`[tool] ${String((event as { toolName: string }).toolName)}\n`);
-    }
+    logHeadlessEvent(event);
   };
 
   let resolveHeadlessConfirmation:
@@ -248,6 +564,7 @@ async function main(): Promise<void> {
 
   // ── Run ─────────────────────────────────────────────────────────────
 
+  const { AgentOrchestrator } = await getOrchestratorModule();
   const orchestrator = new AgentOrchestrator(deps);
   resolveHeadlessConfirmation = (toolCallId: string, approved: boolean) => {
     orchestrator.resolveConfirmation(toolCallId, approved);
