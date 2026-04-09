@@ -195,11 +195,15 @@ async function main(): Promise<void> {
     }
   };
 
+  let resolveHeadlessConfirmation:
+    | ((toolCallId: string, approved: boolean) => void)
+    | null = null;
+
   const requestConfirmation = (details: ConfirmationDetails): void => {
-    // Auto-approve all tool calls in headless mode
     process.stderr.write(
       `[auto-approve] ${details.toolName}: ${details.description}\n`,
     );
+    resolveHeadlessConfirmation?.(details.toolCallId, true);
   };
 
   // ── Build config ────────────────────────────────────────────────────
@@ -245,6 +249,9 @@ async function main(): Promise<void> {
   // ── Run ─────────────────────────────────────────────────────────────
 
   const orchestrator = new AgentOrchestrator(deps);
+  resolveHeadlessConfirmation = (toolCallId: string, approved: boolean) => {
+    orchestrator.resolveConfirmation(toolCallId, approved);
+  };
 
   const taskId = randomUUID();
   const context: AgentContext = {
