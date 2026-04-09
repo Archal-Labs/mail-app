@@ -198,8 +198,8 @@ const modifyLabels: ToolDefinition<{
       throw new Error("Archiving (removing INBOX label) is disabled — too disruptive");
     }
 
-    // The GmailClient doesn't have a generic modifyLabels, so we use
-    // specific methods based on what's being changed
+    const handledLabels = new Set(["STARRED", "UNREAD", "INBOX", "TRASH"]);
+
     if (input.addLabelIds?.includes("STARRED")) {
       await ctx.gmail("setStarred", input.accountId, input.emailId, true);
     }
@@ -218,6 +218,16 @@ const modifyLabels: ToolDefinition<{
     if (input.addLabelIds?.includes("TRASH")) {
       await ctx.gmail("trashMessage", input.accountId, input.emailId);
     }
+
+    const extraAdd = (input.addLabelIds ?? []).filter((labelId) => !handledLabels.has(labelId));
+    const extraRemove = (input.removeLabelIds ?? []).filter(
+      (labelId) => !handledLabels.has(labelId),
+    );
+
+    if (extraAdd.length > 0 || extraRemove.length > 0) {
+      await ctx.gmail("modifyLabels", input.accountId, input.emailId, extraAdd, extraRemove);
+    }
+
     return { modified: true, emailId: input.emailId };
   },
 };
@@ -444,7 +454,12 @@ interface GmailSearchResult {
   snippet: string;
 }
 
-const searchGmail: ToolDefinition<{ accountId: string; query: string; maxResults?: number }> = {
+const searchGmail: ToolDefinition<{
+  accountId: string;
+  query: string;
+  maxResults?: number;
+  pageToken?: string;
+}> = {
   name: "search_gmail",
   description:
     "Search emails via the Gmail API using Gmail's full search syntax (same as the Gmail search bar). " +
@@ -465,20 +480,34 @@ const searchGmail: ToolDefinition<{ accountId: string; query: string; maxResults
     maxResults: z
       .number()
       .optional()
-      .describe("Maximum number of results to return (default 10, max 25)"),
+      .describe("Maximum number of results to return (default 10, max 100)"),
+    pageToken: z
+      .string()
+      .optional()
+      .describe("Pagination token from a previous search_gmail call"),
   }),
   async execute(input, ctx) {
-    const limit = Math.min(input.maxResults ?? 10, 25);
+    const limit = Math.min(Math.max(input.maxResults ?? 10, 1), 100);
 
     // Search Gmail API — returns { results, nextPageToken }
-    const searchResult = (await ctx.gmail("searchEmails", input.accountId, input.query, limit)) as {
+    const searchResult = (await ctx.gmail(
+      "searchEmails",
+      input.accountId,
+      input.query,
+      limit,
+      input.pageToken,
+    )) as {
       results: Array<{ id: string; threadId: string }>;
       nextPageToken?: string;
     };
     const hits = searchResult.results;
 
     if (hits.length === 0) {
-      return { results: [], returnedCount: 0 };
+      return {
+        results: [],
+        returnedCount: 0,
+        ...(searchResult.nextPageToken ? { nextPageToken: searchResult.nextPageToken } : {}),
+      };
     }
 
     // Fetch full email details concurrently
@@ -514,7 +543,11 @@ const searchGmail: ToolDefinition<{ accountId: string; query: string; maxResults
       }
     }
 
-    return { results, returnedCount: results.length };
+    return {
+      results,
+      returnedCount: results.length,
+      ...(searchResult.nextPageToken ? { nextPageToken: searchResult.nextPageToken } : {}),
+    };
   },
 };
 

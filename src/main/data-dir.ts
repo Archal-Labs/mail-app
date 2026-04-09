@@ -19,6 +19,9 @@ let _devDataDir: string | null = null;
 const BOOTSTRAP_MARKER = ".bootstrapped";
 
 export function getDataDir(): string {
+  const overrideDir = process.env.EXO_DATA_DIR?.trim();
+  if (overrideDir) return overrideDir;
+
   if (!is.dev) return app.getPath("userData");
 
   if (!_devDataDir) {

@@ -123,22 +123,39 @@ async function main(): Promise<void> {
 
   // ── Initialize Gmail client ─────────────────────────────────────────
 
-  let gmailClient: GmailClient | null = null;
+  const gmailClients = new Map<string, GmailClient>();
 
-  try {
-    gmailClient = new GmailClient(accountId);
-    await gmailClient.connect();
-    console.error("Gmail client connected");
-  } catch (err) {
-    console.error("Gmail connect failed:", err instanceof Error ? err.message : err);
-    gmailClient = null;
-  }
+  const getGmailClient = async (requestedAccountId: string): Promise<GmailClient | null> => {
+    const cached = gmailClients.get(requestedAccountId);
+    if (cached) {
+      return cached;
+    }
+
+    initIsolatedDataDir(requestedAccountId);
+
+    try {
+      const client = new GmailClient(requestedAccountId);
+      await client.connect();
+      gmailClients.set(requestedAccountId, client);
+      console.error(`Gmail client connected (${requestedAccountId})`);
+      return client;
+    } catch (err) {
+      console.error(
+        `Gmail connect failed (${requestedAccountId}):`,
+        err instanceof Error ? err.message : err,
+      );
+      return null;
+    }
+  };
+
+  await getGmailClient(accountId);
 
   const gmailProxy: OrchestratorDeps["gmailProxy"] = async (
     method: string,
-    _accountId: string,
+    requestedAccountId: string,
     ...args: unknown[]
   ) => {
+    const gmailClient = await getGmailClient(requestedAccountId || accountId);
     const proxy = makeProxy(gmailClient as unknown as Record<string, unknown> | null, "Gmail");
     return proxy(method, ...args);
   };

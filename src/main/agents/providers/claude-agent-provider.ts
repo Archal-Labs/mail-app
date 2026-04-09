@@ -483,6 +483,7 @@ function buildSystemPrompt(
     if (context.currentThreadId) {
       parts.push("- Use read_thread to read the full thread for conversation context");
     }
+    parts.push("- Prefer read_thread when the user is referring to a conversation or thread, not just one message");
   }
 
   if (!context.currentEmailId && !context.currentThreadId && !context.currentDraftId) {
@@ -490,6 +491,9 @@ function buildSystemPrompt(
     parts.push("No email is currently selected. You can help the user with general tasks:");
     parts.push(
       "- Search for emails using search_emails (supports searching by sender name, subject, and body content)",
+    );
+    parts.push(
+      "- Use search_gmail for Gmail-native search syntax; when searching for emails to act on, add `in:inbox` unless the user explicitly wants sent, archived, or trash messages",
     );
     parts.push("- List inbox emails using list_emails");
     parts.push("- Compose new emails using compose_new_email");
@@ -549,6 +553,12 @@ function buildSystemPrompt(
   );
   parts.push(
     "- **Subset replies**: When replying to only some recipients, use create_draft with explicit to/cc/bcc fields.",
+  );
+  parts.push(
+    "- After searching for a thread, verify the threadId before changing labels, drafting replies, or taking other actions so you do not act on a different message from the same search results.",
+  );
+  parts.push(
+    "- If the user asks for multiple actions, complete every requested step before you finish your response.",
   );
 
   parts.push("");

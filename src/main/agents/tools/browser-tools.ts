@@ -78,10 +78,13 @@ const batchModifyLabels: ToolDefinition<{
       const batch = input.emailIds.slice(i, i + BATCH_SIZE);
       const batchResults = await Promise.allSettled(
         batch.map(async (emailId) => {
-          await ctx.gmail("modifyLabels", input.accountId, emailId, {
-            addLabelIds: input.addLabelIds ?? [],
-            removeLabelIds: input.removeLabelIds ?? [],
-          });
+          await ctx.gmail(
+            "modifyLabels",
+            input.accountId,
+            emailId,
+            input.addLabelIds ?? [],
+            input.removeLabelIds ?? [],
+          );
           return emailId;
         }),
       );

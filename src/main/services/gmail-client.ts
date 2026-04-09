@@ -1434,6 +1434,25 @@ export class GmailClient {
   }
 
   /**
+   * Add and remove labels on a message in a single Gmail modify call.
+   */
+  async modifyLabels(
+    messageId: string,
+    addLabelIds: string[],
+    removeLabelIds: string[],
+  ): Promise<void> {
+    const gmail = this.gmail!;
+    await gmail.users.messages.modify({
+      userId: "me",
+      id: messageId,
+      requestBody: {
+        addLabelIds,
+        removeLabelIds,
+      },
+    });
+  }
+
+  /**
    * Mark all messages in a thread as read (removes UNREAD label from every message)
    */
   async markThreadAsRead(threadId: string): Promise<void> {
