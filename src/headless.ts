@@ -43,7 +43,6 @@ type DbModule = typeof import("./main/db");
 let dbModulePromise: Promise<DbModule> | null = null;
 let styleProfilerPromise: Promise<typeof import("./main/services/style-profiler")> | null = null;
 let memoryContextPromise: Promise<typeof import("./main/services/memory-context")> | null = null;
-let draftSyncPromise: Promise<typeof import("./main/services/gmail-draft-sync")> | null = null;
 let orchestratorPromise: Promise<typeof import("./main/agents/orchestrator")> | null = null;
 let gmailClientPromise: Promise<typeof import("./main/services/gmail-client")> | null = null;
 
@@ -60,11 +59,6 @@ async function getStyleProfilerModule(): Promise<typeof import("./main/services/
 async function getMemoryContextModule(): Promise<typeof import("./main/services/memory-context")> {
   memoryContextPromise ??= import("./main/services/memory-context");
   return memoryContextPromise;
-}
-
-async function getDraftSyncModule(): Promise<typeof import("./main/services/gmail-draft-sync")> {
-  draftSyncPromise ??= import("./main/services/gmail-draft-sync");
-  return draftSyncPromise;
 }
 
 async function getOrchestratorModule(): Promise<typeof import("./main/agents/orchestrator")> {
@@ -208,6 +202,122 @@ function extractEmail(field: string): string {
   return match ? match[1] : field;
 }
 
+async function saveDraftAndSyncHeadlessly(
+  emailId: string,
+  body: string,
+  status: string,
+  getGmailClient: (accountId: string) => Promise<GmailClient | null>,
+  cc?: string[],
+  bcc?: string[],
+  composeMode?: string,
+  to?: string[],
+): Promise<void> {
+  const db = await getDbModule();
+  const email = db.getEmail(emailId);
+  if (!email) {
+    throw new Error(`Email not found: ${emailId}`);
+  }
+
+  const oldGmailDraftId = email.draft?.gmailDraftId;
+  db.saveDraft(emailId, body, status, undefined, {
+    ...(to !== undefined ? { to } : {}),
+    ...(cc !== undefined ? { cc } : {}),
+    ...(bcc !== undefined ? { bcc } : {}),
+    ...(composeMode !== undefined ? { composeMode } : {}),
+  });
+
+  const savedDraft = db.getEmail(emailId)?.draft;
+  const syncCc = cc ?? savedDraft?.cc;
+  const syncBcc = bcc ?? savedDraft?.bcc;
+  const syncComposeMode = composeMode ?? savedDraft?.composeMode;
+  const syncTo = to ?? savedDraft?.to;
+
+  const accountId = email.accountId || "default";
+  const gmailClient = await getGmailClient(accountId);
+  if (!gmailClient) {
+    return;
+  }
+
+  try {
+    if (oldGmailDraftId) {
+      try {
+        await gmailClient.deleteDraft(oldGmailDraftId);
+      } catch {
+        // Best-effort replacement; stale remote drafts should not block local state.
+      }
+    }
+
+    const isForward = syncComposeMode === "forward";
+    const replyTo = extractEmail(email.from);
+    const subjectBase = email.subject.replace(/^(?:Re|Fwd|Fw):\s*/i, "");
+    const parentMessageId = isForward ? undefined : db.getEmailMessageIdHeader(emailId) ?? undefined;
+
+    const result = await gmailClient.createDraft({
+      to: isForward ? syncTo?.join(", ") || "" : replyTo,
+      subject: isForward ? `Fwd: ${subjectBase}` : email.subject.startsWith("Re:") ? email.subject : `Re: ${email.subject}`,
+      body,
+      threadId: email.threadId,
+      cc: syncCc,
+      bcc: syncBcc,
+      inReplyTo: parentMessageId,
+      references: parentMessageId,
+    });
+
+    db.updateDraftGmailId(emailId, result.id);
+  } catch (err) {
+    console.error(
+      `[headless] Gmail draft sync failed for ${emailId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+function readContextOverrides(): Partial<AgentContext> {
+  const raw = process.env["EXO_AGENT_CONTEXT_JSON"]?.trim();
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Context override must be a JSON object");
+    }
+
+    const context = parsed as Partial<AgentContext>;
+    return {
+      accountId: typeof context.accountId === "string" ? context.accountId : undefined,
+      currentEmailId: typeof context.currentEmailId === "string" ? context.currentEmailId : undefined,
+      currentThreadId: typeof context.currentThreadId === "string" ? context.currentThreadId : undefined,
+      currentDraftId: typeof context.currentDraftId === "string" ? context.currentDraftId : undefined,
+      selectedEmailIds: Array.isArray(context.selectedEmailIds)
+        ? context.selectedEmailIds.filter((value): value is string => typeof value === "string")
+        : undefined,
+      userEmail: typeof context.userEmail === "string" ? context.userEmail : undefined,
+      userName: typeof context.userName === "string" ? context.userName : undefined,
+      emailSubject: typeof context.emailSubject === "string" ? context.emailSubject : undefined,
+      emailFrom: typeof context.emailFrom === "string" ? context.emailFrom : undefined,
+      emailTo: typeof context.emailTo === "string" ? context.emailTo : undefined,
+      emailBody: typeof context.emailBody === "string" ? context.emailBody : undefined,
+      conversationHistory:
+        typeof context.conversationHistory === "string" ? context.conversationHistory : undefined,
+      memoryContext: typeof context.memoryContext === "string" ? context.memoryContext : undefined,
+      providerConversationIds:
+        context.providerConversationIds &&
+        typeof context.providerConversationIds === "object" &&
+        !Array.isArray(context.providerConversationIds)
+          ? Object.fromEntries(
+              Object.entries(context.providerConversationIds).filter(
+                (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string",
+              ),
+            )
+          : undefined,
+    };
+  } catch (err) {
+    throw new Error(
+      `Invalid EXO_AGENT_CONTEXT_JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 async function generateDraftHeadlessly(
   emailId: string,
   requestedAccountId: string,
@@ -284,8 +394,14 @@ async function generateDraftHeadlessly(
     userEmail,
   });
 
-  const { saveDraftAndSync } = await getDraftSyncModule();
-  saveDraftAndSync(emailId, result.body, "pending", result.cc, result.bcc);
+  await saveDraftAndSyncHeadlessly(
+    emailId,
+    result.body,
+    "pending",
+    getGmailClient,
+    result.cc,
+    result.bcc,
+  );
   return result;
 }
 
@@ -377,8 +493,16 @@ async function generateForwardHeadlessly(
     enableSenderLookup: config.enableSenderLookup ?? true,
   });
 
-  const { saveDraftAndSync } = await getDraftSyncModule();
-  saveDraftAndSync(emailId, result.body, "pending", cc, bcc, "forward", to);
+  await saveDraftAndSyncHeadlessly(
+    emailId,
+    result.body,
+    "pending",
+    getGmailClient,
+    cc,
+    bcc,
+    "forward",
+    to,
+  );
   return result;
 }
 
@@ -448,11 +572,18 @@ async function main(): Promise<void> {
   };
 
   await getGmailClient(accountId);
-  const { saveDraftAndSync } = await getDraftSyncModule();
 
   const headlessDbMethods = {
     ...db,
-    saveDraftAndSync,
+    saveDraftAndSync: async (
+      emailId: string,
+      body: string,
+      status: string,
+      cc?: string[],
+      bcc?: string[],
+      composeMode?: string,
+      to?: string[],
+    ) => saveDraftAndSyncHeadlessly(emailId, body, status, getGmailClient, cc, bcc, composeMode, to),
     generateDraft: async (emailId: string, requestedAccountId: string, instructions?: string) =>
       generateDraftHeadlessly(emailId, requestedAccountId, getGmailClient, instructions),
     generateNewEmail: async (
@@ -571,10 +702,28 @@ async function main(): Promise<void> {
   };
 
   const taskId = randomUUID();
+  const contextOverrides = readContextOverrides();
   const context: AgentContext = {
-    accountId,
-    userEmail: process.env["EXO_USER_EMAIL"] ?? "user@example.com",
-    userName: process.env["EXO_USER_NAME"] ?? "User",
+    accountId: contextOverrides.accountId ?? accountId,
+    currentEmailId: contextOverrides.currentEmailId,
+    currentThreadId: contextOverrides.currentThreadId,
+    currentDraftId: contextOverrides.currentDraftId,
+    selectedEmailIds: contextOverrides.selectedEmailIds,
+    userEmail:
+      contextOverrides.userEmail ??
+      process.env["EXO_USER_EMAIL"] ??
+      "user@example.com",
+    userName:
+      contextOverrides.userName ??
+      process.env["EXO_USER_NAME"] ??
+      "User",
+    emailSubject: contextOverrides.emailSubject,
+    emailFrom: contextOverrides.emailFrom,
+    emailTo: contextOverrides.emailTo,
+    emailBody: contextOverrides.emailBody,
+    providerConversationIds: contextOverrides.providerConversationIds,
+    conversationHistory: contextOverrides.conversationHistory,
+    memoryContext: contextOverrides.memoryContext,
   };
 
   console.error(`Running task: ${task}`);
